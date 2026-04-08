@@ -69,6 +69,7 @@ def list_scans():
             "id": entry,
             "name": config.get("name", entry),
             "url": config.get("url", ""),
+            "synopsis": config.get("synopsis", ""),
             "created_at": config.get("created_at", ""),
             "completed_at": config.get("completed_at"),
             "stage": progress.get("stage", "unknown"),
