@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 """
 Universal VC Startup Scout
-Runs the full scrape -> filter -> classify -> enrich pipeline for a single scan.
+
+Pipeline:
+  scrape/load -> pre-filter -> coarse triage (by name) -> enrich (web search)
+  -> score (with full descriptions) -> auto-categorize (optional)
 
 Usage:
-  python3 scout.py <scan_dir>
+  python3 scout.py <scan_dir>                  # full pipeline
+  python3 scout.py <scan_dir> --enrich-uncertain  # enrich+rescore companies that
+                                                  # were left as name-only
 
 The scan_dir must contain a config.json with:
   { name, url, profile, categories, api_key, [selector] }
@@ -148,7 +153,7 @@ def is_likely_startup(name):
     return True
 
 
-# ---------- Step 3: Classify ----------
+# ---------- Step 3: Coarse triage (cheap, by-name) ----------
 
 def call_claude(api_key, body, timeout=120):
     resp = requests.post(
@@ -173,7 +178,9 @@ def parse_json_text(text):
     return json.loads(text)
 
 
-def batch_classify(companies, config, scan_dir, started_at, batch_size=200):
+def batch_triage(companies, config, scan_dir, started_at, batch_size=200):
+    """Coarse triage by name only. Permissive — meant to drop only obvious mismatches.
+    Real scoring happens later, after enrichment, with full descriptions."""
     api_key = config["api_key"]
     profile = config["profile"]
     categories = config["categories"]
@@ -185,34 +192,33 @@ def batch_classify(companies, config, scan_dir, started_at, batch_size=200):
     for i in range(0, len(companies), batch_size):
         batch = companies[i:i + batch_size]
         batch_num = i // batch_size + 1
-        write_progress(scan_dir, "classifying", "Classifying companies with AI",
+        write_progress(scan_dir, "triaging", "Coarse triage by name",
                        batch_num, total_batches, started_at, {"matches_so_far": len(all_results)})
-        print(f"\nBatch {batch_num}/{total_batches}: Classifying {len(batch)} companies...")
+        print(f"\nTriage batch {batch_num}/{total_batches}: {len(batch)} companies...")
 
-        prompt = f"""You are helping a VC scout startups at a conference.
+        prompt = f"""You are doing a CHEAP first-pass triage of conference attendees for a VC. We will enrich and re-score the survivors later with real descriptions, so be PERMISSIVE here — only drop the obvious mismatches.
 
 VC PROFILE / THESIS:
 {profile}
 
-The VC wants: STARTUPS (early-stage to growth), NOT mature/established companies, VCs, consulting firms, or associations. Innovative solutions, NOT things that have been around for a while.
+For each company below, judge based on the NAME ALONE:
+- DROP it if the name clearly indicates a mature corporate (Fortune 500), bank, ad agency, consulting firm, association, university, government body, or VC fund.
+- KEEP it (with relevance 3-10) if the name COULD be relevant to the VC's thesis, OR if you can't tell from the name (unknown / generic name).
 
-Below is a list of {len(batch)} company names attending the conference. For each one, classify it and score its relevance to the VC's thesis.
+Be GENEROUS — when in doubt, keep it. Final scoring happens later with real data.
 
-COMPANIES:
+COMPANIES ({len(batch)}):
 {chr(10).join(f"- {c}" for c in batch)}
 
-Respond with a JSON array. For each company include:
-- "name": company name
-- "type": "startup" | "growth" | "mature" | "unknown"
-- "relevance": 0-10 score (10 = perfect match for the thesis)
-- "category": one of: {cat_str}
-- "reason": 1-sentence explanation (what they do + why relevant or not)
+Respond with a JSON array. Include only companies you're KEEPING. For each:
+- "name": exact company name
+- "type": "startup" | "growth" | "unknown"
+- "relevance": 3-10 (3 = "name is opaque, can't tell, but include for safety"; 7+ = "name strongly suggests fit")
+- "category": one of: {cat_str}  (best guess from name alone)
+- "reason": 1-sentence explanation (what you guess they do)
 
-Only include companies you classify as "startup" or "growth" with relevance >= 5.
-Skip mature companies, VCs, associations, consulting firms, etc.
-
-Respond ONLY with the JSON array, no other text. If no companies match, return [].
-"""
+Drop anything with type "mature" or that's clearly not a startup.
+Respond ONLY with the JSON array. If nothing kept, return []."""
 
         body = {
             "model": "claude-sonnet-4-5-20250929",
@@ -225,7 +231,7 @@ Respond ONLY with the JSON array, no other text. If no companies match, return [
             text = result["content"][0]["text"]
             matches = parse_json_text(text)
             all_results.extend(matches)
-            print(f"  Found {len(matches)} relevant startups in this batch")
+            print(f"  Kept {len(matches)} companies after triage")
         except Exception as e:
             print(f"  ERROR processing batch: {e}")
 
@@ -235,7 +241,7 @@ Respond ONLY with the JSON array, no other text. If no companies match, return [
     return all_results
 
 
-# ---------- Step 4: Enrich top candidates ----------
+# ---------- Step 4: Enrich (web search) ----------
 
 def enrich_one(name, api_key, profile_summary):
     body = {
@@ -259,30 +265,139 @@ Only JSON, no other text."""}],
     return parse_json_text(text)
 
 
-def enrich_top(candidates, config, scan_dir, started_at, top_n=30):
+def enrich_companies(candidates, config, scan_dir, started_at, label="Enriching companies"):
+    """Enrich every company in `candidates` via web search. Skips already-enriched.
+    Saves results.json incrementally so a long enrich can be paused/cancelled
+    without losing progress."""
     api_key = config["api_key"]
     profile_summary = config["profile"][:300]
+    results_path = os.path.join(scan_dir, "results.json")
 
-    top = sorted(candidates, key=lambda x: x.get("relevance", 0), reverse=True)[:top_n]
-    print(f"\nDeep-diving top {len(top)} candidates via web search...")
+    print(f"\n{label}: {len(candidates)} companies via web search...")
 
     enriched = []
-    for i, company in enumerate(top):
-        write_progress(scan_dir, "enriching", "Enriching top candidates via web search",
-                       i + 1, len(top), started_at)
-        print(f"  [{i+1}/{len(top)}] Searching: {company['name']}...")
-        try:
-            info = enrich_one(company["name"], api_key, profile_summary)
-            enriched.append({**company, **info})
-        except Exception as e:
-            print(f"    Error: {e}")
+    for i, company in enumerate(candidates):
+        write_progress(scan_dir, "enriching", label, i + 1, len(candidates), started_at)
+        print(f"  [{i+1}/{len(candidates)}] {company['name']}...")
+        if company.get("description"):
             enriched.append(company)
+            continue
+        info = None
+        last_err = None
+        for attempt in range(3):
+            try:
+                info = enrich_one(company["name"], api_key, profile_summary)
+                break
+            except Exception as e:
+                last_err = e
+                print(f"    Attempt {attempt+1}/3 failed: {e}")
+                time.sleep(1 + attempt * 2)  # 1s, 3s backoff
+        if info is not None:
+            # Never let Claude's response overwrite the original name (it sometimes
+            # returns a slightly different spelling, which breaks the merge step).
+            info.pop("name", None)
+            info["enriched_at"] = datetime.now(timezone.utc).isoformat()
+            enriched.append({**company, **info})
+        else:
+            print(f"    Giving up on {company['name']} after 3 attempts: {last_err}")
+            enriched.append(company)
+
+        # Incremental save every 10 companies so partial results survive cancel
+        if (i + 1) % 10 == 0 and os.path.exists(results_path):
+            try:
+                with open(results_path) as f:
+                    data = json.load(f)
+                by_name = {c["name"]: c for c in enriched}
+                data["results"] = [by_name.get(r["name"], r) for r in data["results"]]
+                with open(results_path, "w") as f:
+                    json.dump(data, f, indent=2)
+            except Exception:
+                pass
+
         time.sleep(0.5)
 
     return enriched
 
 
-# ---------- Step 5: Auto-generate categories ----------
+# ---------- Step 5: Score with full descriptions ----------
+
+def score_with_descriptions(companies, config, scan_dir, started_at, batch_size=50):
+    """Re-score every company using their full enriched description.
+    This is the REAL score — the triage step was just a coarse keeper."""
+    api_key = config["api_key"]
+    profile = config["profile"]
+
+    total_batches = (len(companies) + batch_size - 1) // batch_size
+    rescored = []
+
+    for i in range(0, len(companies), batch_size):
+        batch = companies[i:i + batch_size]
+        batch_num = i // batch_size + 1
+        write_progress(scan_dir, "scoring", "Scoring with full context",
+                       batch_num, total_batches, started_at)
+        print(f"\nScoring batch {batch_num}/{total_batches} ({len(batch)} companies)...")
+
+        summaries = []
+        for c in batch:
+            desc = c.get("description") or c.get("reason") or ""
+            funding = c.get("funding", "")
+            stage = c.get("stage", c.get("type", ""))
+            summaries.append(f'- {c["name"]} | {stage} | {funding} | {desc[:300]}')
+
+        prompt = f"""You are scoring companies against a VC's thesis using their full enriched descriptions. This is the REAL score — be discriminating.
+
+VC PROFILE / THESIS:
+{profile}
+
+SCORING RUBRIC:
+- 9-10 PERFECT FIT (must meet): truly novel idea, strong technical moat, large TAM, right stage, clearly aligned with the thesis.
+- 7-8  STRONG FIT (worth a conversation): innovative approach to a known problem, clear differentiation, moderate moat, large TAM.
+- 5-6  WEAK FIT (skip unless time): incremental improvement, low defensibility, crowded market, or only tangentially related to the thesis.
+- 3-4  NOT A FIT: wrong sector, wrong stage, generic, or thesis mismatch.
+- 1-2  IRRELEVANT: clearly outside scope.
+
+Be HARSH. Most companies are 5-6. Very few should be 9-10.
+
+COMPANIES ({len(batch)}):
+{chr(10).join(summaries)}
+
+For each company, return a JSON object:
+- "name": exact company name as provided
+- "relevance": 1-10
+- "reason": 1-sentence justification (what they do + why this score)
+
+Respond ONLY with the JSON array."""
+
+        body = {
+            "model": "claude-sonnet-4-5-20250929",
+            "max_tokens": 4096,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+
+        try:
+            result = call_claude(api_key, body)
+            scores = parse_json_text(result["content"][0]["text"])
+            by_name = {s["name"]: s for s in scores}
+            for c in batch:
+                if c["name"] in by_name:
+                    s = by_name[c["name"]]
+                    if "relevance" in s:
+                        c["relevance"] = s["relevance"]
+                    if s.get("reason"):
+                        c["reason"] = s["reason"]
+                rescored.append(c)
+            print(f"  Scored {sum(1 for c in batch if c['name'] in by_name)}/{len(batch)}")
+        except Exception as e:
+            print(f"  ERROR scoring batch: {e}")
+            rescored.extend(batch)
+
+        if i + batch_size < len(companies):
+            time.sleep(1)
+
+    return rescored
+
+
+# ---------- Step 6: Auto-generate categories ----------
 
 def auto_categorize(enriched, config, scan_dir, started_at):
     """Look at enriched companies and ask Claude to propose categories that fit
@@ -363,9 +478,59 @@ Use exact company names. Pick the best-fitting category for each."""
 
 # ---------- Main ----------
 
+def save_results(scan_dir, output):
+    with open(os.path.join(scan_dir, "results.json"), "w") as f:
+        json.dump(output, f, indent=2)
+
+
+def strip_api_key(config_path, config):
+    """Persist config without the api_key (we don't keep keys on disk)."""
+    config_to_save = {k: v for k, v in config.items() if k != "api_key"}
+    with open(config_path, "w") as f:
+        json.dump(config_to_save, f, indent=2)
+
+
+def run_enrich_uncertain(scan_dir, config, config_path):
+    """Enrich the companies that were left as name-only by the initial scan,
+    then re-score them with full context, and merge back into results.json."""
+    started_at = datetime.now(timezone.utc).isoformat()
+    results_path = os.path.join(scan_dir, "results.json")
+    if not os.path.exists(results_path):
+        print("ERROR: results.json not found, nothing to enrich")
+        sys.exit(1)
+    with open(results_path) as f:
+        data = json.load(f)
+
+    unenriched = [c for c in data["results"] if not c.get("description")]
+    if not unenriched:
+        print("Nothing to enrich — every company already has a description")
+        write_progress(scan_dir, "done", "Nothing to enrich", started_at=started_at)
+        strip_api_key(config_path, config)
+        return
+
+    print(f"Enriching {len(unenriched)} uncertain candidates...")
+    enriched = enrich_companies(unenriched, config, scan_dir, started_at,
+                                label=f"Enriching {len(unenriched)} uncertain candidates")
+
+    # Re-score the newly-enriched
+    rescored = score_with_descriptions(enriched, config, scan_dir, started_at)
+
+    # Merge back
+    rescored_by_name = {c["name"]: c for c in rescored}
+    new_results = [rescored_by_name.get(r["name"], r) for r in data["results"]]
+    new_results.sort(key=lambda x: x.get("relevance", 0), reverse=True)
+    data["results"] = new_results
+    data["enriched"] = sum(1 for c in new_results if c.get("description"))
+    save_results(scan_dir, data)
+
+    strip_api_key(config_path, config)
+    write_progress(scan_dir, "done", "Complete", started_at=started_at)
+    print(f"\nDone! {len(unenriched)} companies enriched and rescored.")
+
+
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python3 scout.py <scan_dir>")
+        print("Usage: python3 scout.py <scan_dir> [--enrich-uncertain]")
         sys.exit(1)
 
     scan_dir = sys.argv[1]
@@ -380,6 +545,10 @@ def main():
     if not config.get("api_key"):
         print("ERROR: config.json missing api_key")
         sys.exit(1)
+
+    if "--enrich-uncertain" in sys.argv:
+        run_enrich_uncertain(scan_dir, config, config_path)
+        return
 
     started_at = datetime.now(timezone.utc).isoformat()
 
@@ -401,26 +570,44 @@ def main():
         sys.exit(1)
 
     # Step 2: Pre-filter
-    write_progress(scan_dir, "filtering", "Filtering out known large companies", started_at=started_at)
+    write_progress(scan_dir, "filtering", "Pre-filtering known large companies", started_at=started_at)
     candidates = [c for c in all_companies if is_likely_startup(c)]
-    print(f"Pre-filtered: {len(all_companies) - len(candidates)} known large/mature removed")
+    print(f"Pre-filtered: {len(all_companies) - len(candidates)} dropped")
     print(f"Remaining candidates: {len(candidates)}")
 
-    # Step 3: Classify
-    relevant = batch_classify(candidates, config, scan_dir, started_at)
-    print(f"\nFound {len(relevant)} relevant startups")
+    # Step 3: Coarse triage (cheap, by name only)
+    triaged = batch_triage(candidates, config, scan_dir, started_at)
+    print(f"\nTriaged: {len(triaged)} candidates kept")
 
-    # Step 4: Enrich
-    if relevant:
-        enriched = enrich_top(relevant, config, scan_dir, started_at)
+    # Save triaged results immediately so the UI shows something while enrichment runs
+    save_results(scan_dir, {
+        "total_scraped": len(all_companies),
+        "pre_filtered": len(candidates),
+        "triaged": len(triaged),
+        "enriched": 0,
+        "results": sorted(triaged, key=lambda x: x.get("relevance", 0), reverse=True),
+    })
+
+    # Step 4: Enrich the high-confidence ones (triage relevance >= 5).
+    # Lower-relevance ones are kept as name-only and can be enriched on demand.
+    high_confidence = [c for c in triaged if c.get("relevance", 0) >= 5]
+    print(f"\nEnriching {len(high_confidence)} high-confidence matches "
+          f"(relevance >= 5). {len(triaged) - len(high_confidence)} uncertain "
+          f"candidates left as name-only — enrich on demand.")
+    enriched = enrich_companies(high_confidence, config, scan_dir, started_at,
+                                label=f"Enriching {len(high_confidence)} high-confidence matches")
+
+    # Step 5: Re-score with full descriptions (this is the REAL score)
+    if enriched:
+        scored = score_with_descriptions(enriched, config, scan_dir, started_at)
     else:
-        enriched = []
+        scored = []
 
-    # Merge enrichment back into the relevant list
-    enriched_by_name = {e["name"]: e for e in enriched}
-    all_results = [enriched_by_name.get(r["name"], r) for r in relevant]
+    # Merge: scored enriched companies + untouched uncertain ones
+    scored_by_name = {c["name"]: c for c in scored}
+    all_results = [scored_by_name.get(c["name"], c) for c in triaged]
 
-    # Step 5: Auto-generate categories from the actual dataset (optional)
+    # Step 6: Auto-categorize (optional)
     if config.get("auto_categorize") and all_results:
         all_results, new_cats = auto_categorize(all_results, config, scan_dir, started_at)
         config["categories"] = new_cats
@@ -428,25 +615,19 @@ def main():
     output = {
         "total_scraped": len(all_companies),
         "pre_filtered": len(candidates),
-        "relevant_matches": len(relevant),
-        "top_enriched": len(enriched),
+        "triaged": len(triaged),
+        "enriched": len(enriched),
         "results": sorted(all_results, key=lambda x: x.get("relevance", 0), reverse=True),
     }
+    save_results(scan_dir, output)
 
-    with open(os.path.join(scan_dir, "results.json"), "w") as f:
-        json.dump(output, f, indent=2)
-
-    # Mark complete in config
     config["completed_at"] = datetime.now(timezone.utc).isoformat()
-    # Strip API key from saved config so we don't keep it on disk indefinitely
-    config_to_save = {k: v for k, v in config.items() if k != "api_key"}
-    with open(config_path, "w") as f:
-        json.dump(config_to_save, f, indent=2)
+    strip_api_key(config_path, config)
 
     write_progress(scan_dir, "done", "Complete", started_at=started_at, extra={
         "total_scraped": len(all_companies),
-        "relevant_matches": len(relevant),
-        "top_enriched": len(enriched),
+        "triaged": len(triaged),
+        "enriched": len(enriched),
     })
 
     print(f"\nDone! Results saved to {scan_dir}/results.json")

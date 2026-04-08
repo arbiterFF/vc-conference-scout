@@ -190,6 +190,11 @@ class Handler(SimpleHTTPRequestHandler):
             self.control_scan(m.group(1), m.group(2))
             return
 
+        m = re.match(r"^/api/scans/([^/]+)/enrich-uncertain$", path)
+        if m:
+            self.enrich_uncertain(m.group(1), body)
+            return
+
         m = re.match(r"^/api/scans/([^/]+)/star$", path)
         if m:
             scan_id = m.group(1)
@@ -303,6 +308,41 @@ class Handler(SimpleHTTPRequestHandler):
             self._json_ok()
         except Exception as e:
             self._json_err(500, str(e))
+
+    # ---- Enrich uncertain (post-scan deepening) ----
+
+    def enrich_uncertain(self, scan_id, body):
+        api_key = body.get("api_key", "").strip()
+        if not api_key:
+            self._json_err(400, "Missing api_key")
+            return
+        d = scan_dir(scan_id)
+        if not os.path.isdir(d):
+            self._json_err(404, "Scan not found")
+            return
+        config_path = os.path.join(d, "config.json")
+        config = load_json(config_path) or {}
+        # Re-attach the api_key for the duration of the run; scout.py strips it after
+        config["api_key"] = api_key
+        save_json(config_path, config)
+
+        save_json(os.path.join(d, "progress.json"), {
+            "stage": "enriching",
+            "stage_label": "Starting deep enrichment...",
+            "percent": 0,
+        })
+
+        log_file = open(os.path.join(d, "scout.log"), "a")
+        proc = subprocess.Popen(
+            [sys.executable, os.path.join(SCRIPT_DIR, "scout.py"), d, "--enrich-uncertain"],
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            cwd=SCRIPT_DIR,
+        )
+        with open(os.path.join(d, "scan.pid"), "w") as f:
+            f.write(str(proc.pid))
+
+        self._json_ok()
 
     # ---- Profile extraction ----
 
