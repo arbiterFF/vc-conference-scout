@@ -23,14 +23,14 @@ It's a self-hosted tool. You bring your own Anthropic API key. Your data never l
 
 ## Why this exists
 
-The night before HumanX 2026 I had a list of ~3,400 attending companies and roughly zero hours to read about all of them. I needed:
+The night before HumanX 2026 I had a list of 1,000+ attending companies and roughly zero hours to read about all of them. I needed:
 
 - A way to throw out the 80% that obviously don't fit my thesis (big tech, banks, consulting firms, other VCs).
 - A way to score the remaining 20% by how well they actually match what I invest in — not generic relevance, *my* thesis.
-- A way to look up funding stage, founding year, and HQ without opening 600 Crunchbase tabs.
+- A way to look up funding stage, founding year, and HQ without opening hundreds of Crunchbase tabs.
 - A way to take notes and star the ones I actually wanted to meet.
 
-Two hours and ~$8 of Claude API spend later I had a filterable shortlist of 568 companies, with the top 30 fully enriched. This is that tool, generalized so any VC can point it at any conference.
+A few minutes and a few dollars of Claude API spend later I had a filterable, scored shortlist with every match enriched with real descriptions. This is that tool, generalized so any VC can point it at any conference.
 
 ---
 
@@ -113,18 +113,18 @@ CSV uploads skip the scraping step entirely.
 
 ## Why am I only seeing a few hundred companies out of thousands?
 
-That's the classifier doing its job. The pipeline is a funnel:
+That's the pipeline doing its job. It's a funnel:
 
 ```
-3,433 scraped
-  ↓ pre-filter (drops ~200 obvious mega-corps, VCs, consulting firms)
-3,240 candidates
-  ↓ Claude classify  ← THE BIG CUT
-  ↓ keeps only type=startup|growth AND relevance ≥ 5
-  568 shown in the UI
+N scraped
+  ↓ pre-filter            (drops obvious mega-corps, VCs, consulting firms)
+  ↓ coarse triage         (Claude reads each name, drops obvious mismatches — permissive)
+  ↓ enrich (web search)   (every survivor with relevance ≥ 5 gets a full description)
+  ↓ score with full context (the REAL score, using the description not the name)
+  shortlist in the UI
 ```
 
-Most companies at any conference are mature businesses, service providers, banks, VCs, or simply unrelated to your thesis. The classifier reads each name against your profile and drops anything it scores below 5/10 or classifies as `mature` / `unknown`. The UI's score slider also defaults to 5–10 — so even matches at the low end show by default, but nothing below.
+Most companies at any conference are mature businesses, service providers, banks, VCs, or simply unrelated to your thesis. The pipeline drops them along the way. The UI's score slider also defaults to 5–10 — anything lower is hidden by default.
 
 If you want a longer list, edit `scout.py` → `batch_classify()` and lower the `relevance >= 5` threshold (or remove the `startup|growth` type filter to keep mature companies too).
 
@@ -156,4 +156,4 @@ PRs welcome. The whole thing is ~1,500 LOC across 3 files; it's meant to be hack
 
 ## License
 
-MIT. Built because hand-scrolling 3,400-company lists at 1am the night before a conference is no way to live.
+MIT. Built because hand-scrolling thousand-company attendee lists at 1am the night before a conference is no way to live.
