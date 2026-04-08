@@ -178,6 +178,10 @@ def parse_json_text(text):
     return json.loads(text)
 
 
+class TriageFailure(Exception):
+    """Raised when every triage batch failed (e.g. bad API key, rate limit)."""
+
+
 def batch_triage(companies, config, scan_dir, started_at, batch_size=200):
     """Coarse triage by name only. Permissive — meant to drop only obvious mismatches.
     Real scoring happens later, after enrichment, with full descriptions."""
@@ -188,6 +192,8 @@ def batch_triage(companies, config, scan_dir, started_at, batch_size=200):
 
     all_results = []
     total_batches = (len(companies) + batch_size - 1) // batch_size
+    failed_batches = 0
+    last_error = None
 
     for i in range(0, len(companies), batch_size):
         batch = companies[i:i + batch_size]
@@ -233,10 +239,21 @@ Respond ONLY with the JSON array. If nothing kept, return []."""
             all_results.extend(matches)
             print(f"  Kept {len(matches)} companies after triage")
         except Exception as e:
+            failed_batches += 1
+            last_error = str(e)
             print(f"  ERROR processing batch: {e}")
 
         if i + batch_size < len(companies):
             time.sleep(1)
+
+    # If every batch failed, surface that as a hard error instead of silently
+    # producing an empty results list. Common causes: bad API key, no credit,
+    # rate limit, network failure.
+    if failed_batches == total_batches and total_batches > 0:
+        raise TriageFailure(
+            f"All {total_batches} triage batches failed. Last error: {last_error}. "
+            f"Common causes: invalid Anthropic API key, no credit, rate limit, or network failure."
+        )
 
     return all_results
 
@@ -565,8 +582,17 @@ def main():
         print(f"Scraped {len(all_companies)} unique companies")
 
     if not all_companies:
-        write_progress(scan_dir, "error", "No companies found on page", started_at=started_at)
-        print("ERROR: no companies extracted from page")
+        msg = (
+            f"Couldn't find any company names on {config.get('url') or 'this page'}. "
+            f"The page is likely JavaScript-rendered (the company list loads dynamically "
+            f"after the page opens, so a static fetch sees nothing). "
+            f"Workarounds: (1) upload a CSV/TXT of the company names instead, "
+            f"or (2) view the page source in your browser, find the element wrapping the "
+            f"company names, and provide a CSS selector under \"Advanced\" in the New Scan modal."
+        )
+        write_progress(scan_dir, "error", msg, started_at=started_at, extra={"error_detail": msg})
+        print(f"ERROR: {msg}")
+        strip_api_key(config_path, config)
         sys.exit(1)
 
     # Step 2: Pre-filter
@@ -576,7 +602,13 @@ def main():
     print(f"Remaining candidates: {len(candidates)}")
 
     # Step 3: Coarse triage (cheap, by name only)
-    triaged = batch_triage(candidates, config, scan_dir, started_at)
+    try:
+        triaged = batch_triage(candidates, config, scan_dir, started_at)
+    except TriageFailure as e:
+        write_progress(scan_dir, "error", str(e), started_at=started_at, extra={"error_detail": str(e)})
+        print(f"ERROR: {e}")
+        strip_api_key(config_path, config)
+        sys.exit(1)
     print(f"\nTriaged: {len(triaged)} candidates kept")
 
     # Save triaged results immediately so the UI shows something while enrichment runs

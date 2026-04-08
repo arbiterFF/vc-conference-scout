@@ -92,6 +92,7 @@
         </div>
         <div id="ns-src-url">
           <input id="ns-url" type="url" class="input" placeholder="https://example.com/attendees"/>
+          <p class="text-xs text-gray-500 mt-1">Note: many conference sites load their attendee list with JavaScript (Map-Your-Show, 6Connex, etc.) — those won't work with URL scraping. If the scan fails, copy the company list into a CSV and use the CSV upload tab instead.</p>
           <button type="button" onclick="document.getElementById('ns-advanced').classList.toggle('hidden')" class="text-xs text-violet-600 hover:underline mt-2">▸ Advanced (CSS selector)</button>
           <div id="ns-advanced" class="hidden mt-2">
             <input id="ns-selector" type="text" class="input" placeholder="e.g. .company-name (leave blank for auto-detect)"/>
@@ -455,9 +456,10 @@ async function renderHome() {
 }
 
 function renderScanCard(s) {
-  const isDone = s.stage === 'done' || s.completed_at;
-  const statusBg = isDone ? 'bg-green-100 text-green-800' : (s.stage === 'error' ? 'bg-red-100 text-red-800' : 'bg-yellow-100 text-yellow-800');
-  const statusLabel = isDone ? 'Complete' : (s.stage_label || s.stage || 'Running');
+  const isError = s.stage === 'error';
+  const isDone = !isError && (s.stage === 'done' || s.completed_at);
+  const statusBg = isError ? 'bg-red-100 text-red-800' : (isDone ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800');
+  const statusLabel = isError ? 'Failed' : (isDone ? 'Complete' : (s.stage_label || s.stage || 'Running'));
   return `
     <a href="#/scan/${s.id}" class="block bg-white rounded-xl border p-5 hover:shadow-md transition-shadow relative">
       <button onclick="event.preventDefault();event.stopPropagation();deleteScan('${s.id}', '${(s.name||'').replace(/'/g,"\\'")}')" class="absolute top-3 right-3 text-gray-300 hover:text-red-500" title="Delete">&times;</button>
@@ -705,6 +707,21 @@ async function pollProgress(id) {
       document.getElementById('btn-cancel').classList.add('hidden');
       if (progressInterval) { clearInterval(progressInterval); progressInterval = null; }
       loadScanData(id);
+      return;
+    }
+    if (p.stage === 'error') {
+      banner.classList.remove('hidden');
+      banner.classList.remove('bg-violet-600','bg-gray-600');
+      banner.classList.add('bg-red-600');
+      document.getElementById('progress-spinner').classList.add('hidden');
+      const detail = p.error_detail || p.stage_label || 'Scan failed';
+      document.getElementById('progress-label').innerHTML = '<strong>Scan failed:</strong> ' + detail;
+      document.getElementById('progress-bar').style.width = '0%';
+      document.getElementById('progress-pct').textContent = '';
+      document.getElementById('btn-pause').classList.add('hidden');
+      document.getElementById('btn-resume').classList.add('hidden');
+      document.getElementById('btn-cancel').classList.add('hidden');
+      if (progressInterval) { clearInterval(progressInterval); progressInterval = null; }
       return;
     }
     if (p.stage === 'done') {

@@ -58,6 +58,13 @@ def list_scans():
         config = load_json(os.path.join(d, "config.json"), {}) or {}
         progress = load_json(os.path.join(d, "progress.json"), {}) or {}
         results = load_json(os.path.join(d, "results.json"), {}) or {}
+        # New pipeline writes "triaged" / "enriched"; old runs wrote "relevant_matches".
+        # Fall back through both, then to the actual results array length.
+        match_count = (
+            results.get("triaged")
+            or results.get("relevant_matches")
+            or len(results.get("results") or [])
+        )
         scans.append({
             "id": entry,
             "name": config.get("name", entry),
@@ -68,7 +75,8 @@ def list_scans():
             "stage_label": progress.get("stage_label", ""),
             "percent": progress.get("percent", 0),
             "total_scraped": results.get("total_scraped", 0),
-            "relevant_matches": results.get("relevant_matches", 0),
+            "relevant_matches": match_count,
+            "enriched": results.get("enriched", 0),
         })
     # Most recent first
     scans.sort(key=lambda s: s.get("created_at", ""), reverse=True)
