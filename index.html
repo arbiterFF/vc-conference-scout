@@ -523,11 +523,14 @@ async function renderScan(id) {
     </div>
     <div class="max-w-7xl mx-auto px-6 py-8">
       <div class="mb-4"><a href="#/" class="text-sm text-violet-600 hover:underline">&larr; Back to scans</a></div>
-      <div class="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 mb-6">
+      <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-4">
         <div class="flex-1 min-w-0">
           <h1 id="scan-title" class="text-3xl font-bold text-gray-900">Loading...</h1>
-          <p id="scan-synopsis" class="hidden text-sm text-gray-400 mt-2 max-w-3xl"></p>
-          <p id="stats" class="text-gray-500 mt-1"></p>
+          <div class="flex items-center gap-3 mt-1">
+            <p id="stats" class="text-gray-500 text-sm"></p>
+            <button id="synopsis-toggle" class="hidden text-xs text-violet-600 hover:underline" onclick="toggleSynopsis()">ⓘ About this conference</button>
+          </div>
+          <p id="scan-synopsis" class="hidden text-xs text-gray-500 mt-2 max-w-3xl bg-gray-50 border border-gray-200 rounded p-3"></p>
         </div>
         <div class="flex items-center gap-2">
           <button id="enrich-uncertain-btn" onclick="enrichUncertain()" class="hidden btn btn-secondary whitespace-nowrap" title="Enrich the candidates that are still name-only"></button>
@@ -592,6 +595,14 @@ async function renderScan(id) {
   pollProgress(id);
 }
 
+function toggleSynopsis() {
+  const el = document.getElementById('scan-synopsis');
+  const btn = document.getElementById('synopsis-toggle');
+  const isHidden = el.classList.contains('hidden');
+  el.classList.toggle('hidden');
+  btn.textContent = isHidden ? '✕ Hide' : 'ⓘ About this conference';
+}
+
 async function loadScanData(id) {
   try {
     const res = await fetch('/api/scans/' + id);
@@ -600,11 +611,15 @@ async function loadScanData(id) {
     currentScanConfig = data.config || {};
     document.getElementById('scan-title').textContent = data.config.name || id;
     const synopsisEl = document.getElementById('scan-synopsis');
+    const synopsisToggle = document.getElementById('synopsis-toggle');
     if (data.config.synopsis) {
       synopsisEl.textContent = data.config.synopsis;
-      synopsisEl.classList.remove('hidden');
+      synopsisEl.classList.add('hidden');           // collapsed by default
+      synopsisToggle.classList.remove('hidden');
+      synopsisToggle.textContent = 'ⓘ About this conference';
     } else {
       synopsisEl.classList.add('hidden');
+      synopsisToggle.classList.add('hidden');
     }
     starred = data.starred || {};
     allData = (data.results.results || []).map(d => ({
