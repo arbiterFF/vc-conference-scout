@@ -397,7 +397,7 @@ Only JSON, no other text. If you genuinely cannot find anything, return {{"descr
         "messages": [{"role": "user", "content": user_msg}],
     }
     if use_search:
-        body["tools"] = [{"type": "web_search_20250305", "name": "web_search", "max_uses": 3}]
+        body["tools"] = [{"type": "web_search_20260209", "name": "web_search", "max_uses": 3}]
 
     result = call_claude(api_key, body, timeout=90)
     text_parts = [b["text"] for b in result["content"] if b.get("type") == "text"]
