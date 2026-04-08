@@ -6,6 +6,8 @@ VC Conference Scout takes a conference's attendee list (a URL to scrape, or a CS
 
 It's a self-hosted tool. You bring your own Anthropic API key. Your data never leaves your machine.
 
+![VC Conference Scout dashboard](docs/screenshot.png)
+
 ---
 
 ## What it does
@@ -109,6 +111,25 @@ CSV uploads skip the scraping step entirely.
 
 ---
 
+## Why am I only seeing a few hundred companies out of thousands?
+
+That's the classifier doing its job. The pipeline is a funnel:
+
+```
+3,433 scraped
+  ↓ pre-filter (drops ~200 obvious mega-corps, VCs, consulting firms)
+3,240 candidates
+  ↓ Claude classify  ← THE BIG CUT
+  ↓ keeps only type=startup|growth AND relevance ≥ 5
+  568 shown in the UI
+```
+
+Most companies at any conference are mature businesses, service providers, banks, VCs, or simply unrelated to your thesis. The classifier reads each name against your profile and drops anything it scores below 5/10 or classifies as `mature` / `unknown`. The UI's score slider also defaults to 5–10 — so even matches at the low end show by default, but nothing below.
+
+If you want a longer list, edit `scout.py` → `batch_classify()` and lower the `relevance >= 5` threshold (or remove the `startup|growth` type filter to keep mature companies too).
+
+---
+
 ## Cost
 
 Each scan with ~3,000 attendees costs roughly **$5–10** in Claude API spend:
@@ -135,4 +156,4 @@ PRs welcome. The whole thing is ~1,500 LOC across 3 files; it's meant to be hack
 
 ## License
 
-MIT. Built by [Francesco Favaro](https://crosscourt.vc) at Crosscourt Ventures because hand-scrolling 3,400-company lists at 1am the night before HumanX is no way to live.
+MIT. Built because hand-scrolling 3,400-company lists at 1am the night before a conference is no way to live.

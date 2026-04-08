@@ -50,6 +50,8 @@ def list_scans():
     if not os.path.exists(SCANS_DIR):
         return scans
     for entry in sorted(os.listdir(SCANS_DIR)):
+        if entry.startswith("."):
+            continue
         d = scan_dir(entry)
         if not os.path.isdir(d):
             continue
@@ -118,8 +120,12 @@ class Handler(SimpleHTTPRequestHandler):
             if not os.path.isdir(d):
                 self._json_err(404, "Scan not found")
                 return
-            import shutil
-            shutil.rmtree(d)
+            # Soft-delete: move to scans/.trash/<id>-<timestamp>/
+            trash_dir = os.path.join(SCANS_DIR, ".trash")
+            os.makedirs(trash_dir, exist_ok=True)
+            ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+            dest = os.path.join(trash_dir, f"{scan_id}-{ts}")
+            os.rename(d, dest)
             self._json_ok()
             return
         self._json_err(404, "Not found")
@@ -179,6 +185,11 @@ class Handler(SimpleHTTPRequestHandler):
             self.create_scan(body)
             return
 
+        m = re.match(r"^/api/scans/([^/]+)/(pause|resume|cancel)$", path)
+        if m:
+            self.control_scan(m.group(1), m.group(2))
+            return
+
         m = re.match(r"^/api/scans/([^/]+)/star$", path)
         if m:
             scan_id = m.group(1)
@@ -232,6 +243,66 @@ class Handler(SimpleHTTPRequestHandler):
             return
 
         self._json_err(404, "Not found")
+
+    # ---- Scan control ----
+
+    def control_scan(self, scan_id, action):
+        import signal
+        d = scan_dir(scan_id)
+        if not os.path.isdir(d):
+            self._json_err(404, "Scan not found")
+            return
+        pid_path = os.path.join(d, "scan.pid")
+        if not os.path.exists(pid_path):
+            self._json_err(400, "No active scan PID")
+            return
+        try:
+            pid = int(open(pid_path).read().strip())
+        except Exception:
+            self._json_err(400, "Invalid PID file")
+            return
+
+        # Check process is alive
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            self._json_err(400, "Scan process is no longer running")
+            return
+
+        try:
+            if action == "pause":
+                os.kill(pid, signal.SIGSTOP)
+                open(os.path.join(d, "paused.flag"), "w").close()
+                # Mark in progress.json
+                p = load_json(os.path.join(d, "progress.json"), {}) or {}
+                p["paused"] = True
+                save_json(os.path.join(d, "progress.json"), p)
+            elif action == "resume":
+                os.kill(pid, signal.SIGCONT)
+                try:
+                    os.remove(os.path.join(d, "paused.flag"))
+                except FileNotFoundError:
+                    pass
+                p = load_json(os.path.join(d, "progress.json"), {}) or {}
+                p["paused"] = False
+                save_json(os.path.join(d, "progress.json"), p)
+            elif action == "cancel":
+                # SIGCONT first in case it was paused, then SIGTERM
+                try: os.kill(pid, signal.SIGCONT)
+                except OSError: pass
+                os.kill(pid, signal.SIGTERM)
+                try:
+                    os.remove(os.path.join(d, "paused.flag"))
+                except FileNotFoundError:
+                    pass
+                p = load_json(os.path.join(d, "progress.json"), {}) or {}
+                p["stage"] = "cancelled"
+                p["stage_label"] = "Cancelled by user"
+                p["paused"] = False
+                save_json(os.path.join(d, "progress.json"), p)
+            self._json_ok()
+        except Exception as e:
+            self._json_err(500, str(e))
 
     # ---- Profile extraction ----
 
@@ -339,14 +410,16 @@ Respond with just the profile text, no preamble."""
             "percent": 0,
         })
 
-        # Spawn scout subprocess (detached)
+        # Spawn scout subprocess (detached) and record PID
         log_file = open(os.path.join(d, "scout.log"), "w")
-        subprocess.Popen(
+        proc = subprocess.Popen(
             [sys.executable, os.path.join(SCRIPT_DIR, "scout.py"), d],
             stdout=log_file,
             stderr=subprocess.STDOUT,
             cwd=SCRIPT_DIR,
         )
+        with open(os.path.join(d, "scan.pid"), "w") as f:
+            f.write(str(proc.pid))
 
         self._json({"id": scan_id})
 

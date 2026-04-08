@@ -208,28 +208,111 @@ function setSourceMode(mode) {
   document.getElementById('ns-src-csv').classList.toggle('hidden', mode!=='csv');
 }
 
-function parseCsv(text) {
-  // Simple parser: take first comma-separated field of each line, handle quotes
-  const lines = text.split(/\r?\n/);
-  const out = [];
-  for (let line of lines) {
-    line = line.trim();
-    if (!line) continue;
-    let name;
-    if (line.startsWith('"')) {
-      const m = line.match(/^"((?:[^"]|"")*)"/);
-      name = m ? m[1].replace(/""/g, '"') : line;
+// Parse CSV into rows of cells (handles quoted fields with commas/quotes/newlines)
+function parseCsvRows(text) {
+  const rows = [];
+  let row = [];
+  let cell = '';
+  let inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inQuotes) {
+      if (ch === '"' && text[i+1] === '"') { cell += '"'; i++; }
+      else if (ch === '"') { inQuotes = false; }
+      else { cell += ch; }
     } else {
-      name = line.split(',')[0];
+      if (ch === '"') { inQuotes = true; }
+      else if (ch === ',') { row.push(cell); cell = ''; }
+      else if (ch === '\n' || ch === '\r') {
+        if (cell !== '' || row.length) { row.push(cell); rows.push(row); row = []; cell = ''; }
+        if (ch === '\r' && text[i+1] === '\n') i++;
+      } else { cell += ch; }
     }
-    name = name.trim();
-    if (name) out.push(name);
   }
-  // Skip header row if it looks like one
-  if (out.length && /^(name|company|company name|organization|exhibitor)$/i.test(out[0])) {
-    out.shift();
+  if (cell !== '' || row.length) { row.push(cell); rows.push(row); }
+  return rows.map(r => r.map(c => c.trim()));
+}
+
+const HEADER_RE = /^(name|company|company\s*name|organization|exhibitor|exhibitors|attendee|attendees|startup|startup\s*name|account|account\s*name|brand)$/i;
+
+function looksLikeName(v) {
+  if (!v) return false;
+  if (v.length < 2 || v.length > 120) return false;
+  if (/^https?:\/\//i.test(v)) return false;       // URL
+  if (/^[\d.,$%+\-/\s]+$/.test(v)) return false;   // pure number/currency
+  if (!/[A-Za-z]/.test(v)) return false;            // no letters
+  return true;
+}
+
+// Score how "name-like" a column is
+function scoreColumn(rows, colIdx) {
+  let nameish = 0, total = 0, totalLen = 0;
+  const distinct = new Set();
+  for (const r of rows) {
+    const v = r[colIdx];
+    if (v === undefined || v === '') continue;
+    total++;
+    if (looksLikeName(v)) {
+      nameish++;
+      totalLen += v.length;
+      distinct.add(v.toLowerCase());
+    }
   }
-  // Dedupe
+  if (total === 0) return -Infinity;
+  const avgLen = nameish ? totalLen / nameish : 0;
+  // Sweet spot for company names is 5-50 chars
+  let lenBonus = 0;
+  if (avgLen >= 5 && avgLen <= 50) lenBonus = 20;
+  else if (avgLen > 50 && avgLen <= 80) lenBonus = 5;
+  return nameish * 2 + distinct.size + lenBonus - (total - nameish);
+}
+
+function parseCsv(text) {
+  const rows = parseCsvRows(text).filter(r => r.some(c => c !== ''));
+  if (!rows.length) return [];
+
+  const maxCols = Math.max(...rows.map(r => r.length));
+
+  // 1) Find a header row in the first ~5 rows that matches HEADER_RE
+  let headerRowIdx = -1;
+  let nameColIdx = -1;
+  for (let i = 0; i < Math.min(5, rows.length); i++) {
+    for (let c = 0; c < rows[i].length; c++) {
+      if (HEADER_RE.test(rows[i][c])) {
+        headerRowIdx = i;
+        nameColIdx = c;
+        break;
+      }
+    }
+    if (nameColIdx !== -1) break;
+  }
+
+  // 2) If no header found, score every column and pick the best
+  if (nameColIdx === -1) {
+    let bestScore = -Infinity;
+    for (let c = 0; c < maxCols; c++) {
+      const s = scoreColumn(rows, c);
+      if (s > bestScore) { bestScore = s; nameColIdx = c; }
+    }
+  }
+
+  if (nameColIdx === -1) return [];
+
+  // 3) Extract that column, skipping header row and noise
+  const NOISE = /^(all\s+exhibitors|attendees|companies|sponsors|exhibitors|sheet\s*\d*|page\s*\d*)/i;
+  const out = [];
+  for (let i = 0; i < rows.length; i++) {
+    if (i === headerRowIdx) continue;
+    const v = rows[i][nameColIdx];
+    if (!v) continue;
+    if (HEADER_RE.test(v)) continue;
+    if (NOISE.test(v)) continue;
+    if (/\(\s*\d+\s*\)/.test(v) && v.length < 40) continue; // "All Exhibitors ( 378 )"
+    if (!looksLikeName(v)) continue;
+    out.push(v);
+  }
+
+  // Dedupe (case-insensitive, preserve order)
   const seen = new Set();
   return out.filter(n => {
     const k = n.toLowerCase();
@@ -409,12 +492,18 @@ async function renderScan(id) {
 
   // Render scan detail shell (the existing UI)
   view.innerHTML = `
-    <div id="progress-banner" class="hidden bg-violet-600 text-white px-6 py-3">
-      <div class="max-w-7xl mx-auto flex items-center gap-3">
-        <svg class="animate-spin h-5 w-5" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" fill="none"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"/></svg>
-        <span id="progress-label">Starting...</span>
-        <div class="flex-1 bg-violet-400 rounded-full h-2 ml-4"><div id="progress-bar" class="bg-white rounded-full h-2 transition-all" style="width:0%"></div></div>
-        <span id="progress-pct" class="text-sm font-mono">0%</span>
+    <div id="progress-banner" class="hidden bg-violet-600 text-white px-6 py-4">
+      <div class="max-w-7xl mx-auto">
+        <div class="flex items-center gap-3 mb-3">
+          <svg id="progress-spinner" class="animate-spin h-5 w-5" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" fill="none"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"/></svg>
+          <span id="progress-label">Starting...</span>
+          <div class="flex-1 bg-violet-400 rounded-full h-2 mx-4"><div id="progress-bar" class="bg-white rounded-full h-2 transition-all" style="width:0%"></div></div>
+          <span id="progress-pct" class="text-sm font-mono mr-2">0%</span>
+          <button id="btn-pause" onclick="controlScan('pause')" class="text-xs px-3 py-1 rounded border border-white/40 hover:bg-white/10">⏸ Pause</button>
+          <button id="btn-resume" onclick="controlScan('resume')" class="hidden text-xs px-3 py-1 rounded border border-white/40 hover:bg-white/10">▶ Resume</button>
+          <button id="btn-cancel" onclick="controlScan('cancel')" class="text-xs px-3 py-1 rounded border border-white/40 hover:bg-white/10">✕ Cancel</button>
+        </div>
+        <div id="progress-steps" class="flex items-center gap-2 text-xs flex-wrap"></div>
       </div>
     </div>
     <div class="max-w-7xl mx-auto px-6 py-8">
@@ -489,6 +578,7 @@ async function loadScanData(id) {
     const res = await fetch('/api/scans/' + id);
     if (!res.ok) throw new Error('Scan not found');
     const data = await res.json();
+    currentScanConfig = data.config || {};
     document.getElementById('scan-title').textContent = data.config.name || id;
     starred = data.starred || {};
     allData = (data.results.results || []).map(d => ({
@@ -504,27 +594,112 @@ async function loadScanData(id) {
   }
 }
 
+// Pipeline step definitions
+const PIPELINE_STEPS = [
+  { key: 'load', label: 'Load companies', stages: ['starting', 'scraping', 'loading'] },
+  { key: 'filter', label: 'Pre-filter', stages: ['filtering'] },
+  { key: 'classify', label: 'Classify & score', stages: ['classifying'] },
+  { key: 'enrich', label: 'Enrich top candidates', stages: ['enriching'] },
+  { key: 'categorize', label: 'Auto-categorize', stages: ['categorizing'], optional: true },
+];
+
+let currentScanConfig = null;
+
+function renderProgressSteps(currentStage) {
+  const container = document.getElementById('progress-steps');
+  if (!container) return;
+  const autoCategorize = currentScanConfig && currentScanConfig.auto_categorize;
+  const steps = PIPELINE_STEPS.filter(s => !s.optional || autoCategorize);
+
+  // Determine which step is active and which are done
+  let activeIdx = -1;
+  for (let i = 0; i < steps.length; i++) {
+    if (steps[i].stages.includes(currentStage)) { activeIdx = i; break; }
+  }
+  // If currentStage isn't recognized but is "done", mark all done
+  if (currentStage === 'done') activeIdx = steps.length;
+
+  container.innerHTML = steps.map((s, i) => {
+    let icon, opacity;
+    if (i < activeIdx) { icon = '✓'; opacity = '1'; }
+    else if (i === activeIdx) { icon = '●'; opacity = '1'; }
+    else { icon = '○'; opacity = '0.5'; }
+    const sep = i < steps.length - 1 ? '<span class="text-violet-300 mx-1">→</span>' : '';
+    const weight = i === activeIdx ? 'font-semibold' : '';
+    return `<span style="opacity:${opacity}" class="${weight}">${icon} ${s.label}</span>${sep}`;
+  }).join('');
+}
+
+async function controlScan(action) {
+  if (!currentScanId) return;
+  if (action === 'cancel' && !confirm('Cancel this scan? Partial results will be kept.')) return;
+  try {
+    const res = await fetch('/api/scans/' + currentScanId + '/' + action, { method: 'POST' });
+    if (!res.ok) throw new Error((await res.json()).error || 'Failed');
+    pollProgress(currentScanId);
+  } catch (e) {
+    alert('Error: ' + e.message);
+  }
+}
+
 async function pollProgress(id) {
   try {
     const res = await fetch('/api/scans/' + id + '/progress');
     const p = await res.json();
     const banner = document.getElementById('progress-banner');
     if (!banner) return;
-    if (p.stage === 'done' || !p.stage) {
+    if (!p.stage) {
       banner.classList.add('hidden');
-      if (p.stage === 'done' && progressInterval) {
+      return;
+    }
+    if (p.stage === 'cancelled') {
+      banner.classList.remove('hidden');
+      banner.classList.remove('bg-violet-600');
+      banner.classList.add('bg-gray-600');
+      document.getElementById('progress-spinner').classList.add('hidden');
+      document.getElementById('progress-label').textContent = 'Cancelled';
+      document.getElementById('btn-pause').classList.add('hidden');
+      document.getElementById('btn-resume').classList.add('hidden');
+      document.getElementById('btn-cancel').classList.add('hidden');
+      if (progressInterval) { clearInterval(progressInterval); progressInterval = null; }
+      loadScanData(id);
+      return;
+    }
+    if (p.stage === 'done') {
+      // Show steps as all done briefly, then hide
+      renderProgressSteps('done');
+      document.getElementById('progress-bar').style.width = '100%';
+      document.getElementById('progress-pct').textContent = '100%';
+      document.getElementById('progress-label').textContent = 'Complete';
+      if (progressInterval) {
         clearInterval(progressInterval);
         progressInterval = null;
         loadScanData(id);
+        setTimeout(() => banner.classList.add('hidden'), 1500);
       }
       return;
     }
     banner.classList.remove('hidden');
-    document.getElementById('progress-label').textContent = p.stage_label || p.stage;
+    banner.classList.remove('bg-gray-600');
+    banner.classList.add('bg-violet-600');
+    const spinner = document.getElementById('progress-spinner');
+    if (p.paused) {
+      spinner.classList.add('hidden');
+      document.getElementById('btn-pause').classList.add('hidden');
+      document.getElementById('btn-resume').classList.remove('hidden');
+      document.getElementById('progress-label').textContent = '⏸ Paused — ' + (p.stage_label || p.stage);
+    } else {
+      spinner.classList.remove('hidden');
+      document.getElementById('btn-pause').classList.remove('hidden');
+      document.getElementById('btn-resume').classList.add('hidden');
+      document.getElementById('progress-label').textContent = p.stage_label || p.stage;
+    }
+    document.getElementById('btn-cancel').classList.remove('hidden');
     document.getElementById('progress-bar').style.width = (p.percent || 0) + '%';
     document.getElementById('progress-pct').textContent = (p.percent || 0) + '%';
+    renderProgressSteps(p.stage);
     // Reload data periodically as new matches stream in
-    if (p.stage === 'classifying' || p.stage === 'enriching') {
+    if (p.stage === 'classifying' || p.stage === 'enriching' || p.stage === 'categorizing') {
       loadScanData(id);
     }
   } catch {}
