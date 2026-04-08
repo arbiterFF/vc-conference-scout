@@ -135,4 +135,4 @@ PRs welcome. The whole thing is ~1,500 LOC across 3 files; it's meant to be hack
 
 ## License
 
-MIT. Built by [Francesco Favaro](https://crosscourt.vc) at Crosscourt Ventures because hand-scrolling 3,400-company lists at 1am the night before HumanX is no way to live.
+MIT. Built because hand-scrolling 3,400-company lists at 1am the night before a conference is no way to live.

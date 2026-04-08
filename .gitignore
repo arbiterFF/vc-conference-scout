@@ -10,6 +10,9 @@ scans/*/progress.json
 scans/*/companies.json
 scans/*/scout.log
 scans/*/config.json
+scans/*/scan.pid
+scans/*/paused.flag
+scans/.trash/
 
 # But keep the scans/ folder structure
 !scans/.gitkeep
