@@ -178,6 +178,65 @@ def parse_json_text(text):
     return json.loads(text)
 
 
+def salvage_json_array(text):
+    """Try to parse a JSON array. If it fails (truncation, one bad object,
+    trailing junk), walk through the text and recover every complete top-level
+    {...} object we can find. Returns a list, possibly empty."""
+    text = text.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```\w*\n?", "", text)
+        text = re.sub(r"\n?```$", "", text)
+
+    # Fast path: it's valid JSON
+    try:
+        result = json.loads(text)
+        return result if isinstance(result, list) else []
+    except json.JSONDecodeError:
+        pass
+
+    # Slow path: walk the text, extract complete top-level {...} objects.
+    # Tolerates truncation (max_tokens hit), malformed last entry, etc.
+    if not text.startswith("["):
+        idx = text.find("[")
+        if idx < 0:
+            return []
+        text = text[idx:]
+
+    objects = []
+    depth = 0
+    in_str = False
+    escape = False
+    start = None
+    for i in range(1, len(text)):  # skip the leading [
+        ch = text[i]
+        if in_str:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_str = False
+        else:
+            if ch == '"':
+                in_str = True
+            elif ch == "{":
+                if depth == 0:
+                    start = i
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0 and start is not None:
+                    candidate = text[start:i + 1]
+                    try:
+                        obj = json.loads(candidate)
+                        if isinstance(obj, dict):
+                            objects.append(obj)
+                    except json.JSONDecodeError:
+                        pass  # skip the bad one, keep going
+                    start = None
+    return objects
+
+
 class TriageFailure(Exception):
     """Raised when every triage batch failed (e.g. bad API key, rate limit)."""
 
@@ -232,14 +291,18 @@ Respond ONLY with the JSON array. If nothing kept, return []."""
 
         body = {
             "model": "claude-sonnet-4-5-20250929",
-            "max_tokens": 4096,
+            "max_tokens": 8192,
             "messages": [{"role": "user", "content": prompt}],
         }
 
         try:
             result = call_claude(api_key, body)
             text = result["content"][0]["text"]
-            matches = parse_json_text(text)
+            # Use salvage parser: tolerates truncation (max_tokens hit) by
+            # recovering every complete top-level object before the failure point.
+            matches = salvage_json_array(text)
+            if not matches:
+                raise ValueError(f"No parseable JSON objects in response (first 200 chars: {text[:200]!r})")
             all_results.extend(matches)
             print(f"  Kept {len(matches)} companies after triage")
         except Exception as e:
@@ -478,14 +541,14 @@ Respond ONLY with the JSON array."""
 
         body = {
             "model": "claude-sonnet-4-5-20250929",
-            "max_tokens": 4096,
+            "max_tokens": 8192,
             "messages": [{"role": "user", "content": prompt}],
         }
 
         try:
             result = call_claude(api_key, body)
-            scores = parse_json_text(result["content"][0]["text"])
-            by_name = {s["name"]: s for s in scores}
+            scores = salvage_json_array(result["content"][0]["text"])
+            by_name = {s["name"]: s for s in scores if isinstance(s, dict) and s.get("name")}
             for c in batch:
                 if c["name"] in by_name:
                     s = by_name[c["name"]]
@@ -567,11 +630,11 @@ Use exact company names. Pick the best-fitting category for each."""
         try:
             result = call_claude(api_key, {
                 "model": "claude-sonnet-4-5-20250929",
-                "max_tokens": 4096,
+                "max_tokens": 8192,
                 "messages": [{"role": "user", "content": prompt}],
             })
-            assignments = parse_json_text(result["content"][0]["text"])
-            by_name = {a["name"]: a.get("category") for a in assignments}
+            assignments = salvage_json_array(result["content"][0]["text"])
+            by_name = {a["name"]: a.get("category") for a in assignments if isinstance(a, dict) and a.get("name")}
             for c in batch:
                 if c["name"] in by_name and by_name[c["name"]]:
                     c["category"] = by_name[c["name"]]
@@ -623,9 +686,20 @@ def run_enrich_uncertain(scan_dir, config, config_path):
     # Re-score the newly-enriched
     rescored = score_with_descriptions(enriched, config, scan_dir, started_at)
 
-    # Merge back
+    # Drop any newly-enriched company that fell below 5/10 after rescoring
+    dropped_names = {c["name"] for c in rescored if (c.get("relevance") or 0) < 5}
+    if dropped_names:
+        print(f"\nDropping {len(dropped_names)} companies that scored below 5 after rescoring: "
+              f"{', '.join(sorted(dropped_names))}")
+    rescored = [c for c in rescored if c["name"] not in dropped_names]
+
+    # Merge back, skipping the dropped ones
     rescored_by_name = {c["name"]: c for c in rescored}
-    new_results = [rescored_by_name.get(r["name"], r) for r in data["results"]]
+    new_results = []
+    for r in data["results"]:
+        if r["name"] in dropped_names:
+            continue
+        new_results.append(rescored_by_name.get(r["name"], r))
     new_results.sort(key=lambda x: x.get("relevance", 0), reverse=True)
     data["results"] = new_results
     data["enriched"] = sum(1 for c in new_results if c.get("description"))
@@ -737,9 +811,23 @@ def main():
     else:
         scored = []
 
-    # Merge: scored enriched companies + untouched uncertain ones
+    # Drop any company that fell below 5/10 after rescoring with full descriptions.
+    # The triage score was a guess from the name; the rescore is the truth, and
+    # the UI hides anything below 5 anyway. Keeping them around just inflates
+    # the count and confuses users ("31 of 32" with no apparent filter).
+    dropped_names = {c["name"] for c in scored if (c.get("relevance") or 0) < 5}
+    if dropped_names:
+        print(f"\nDropping {len(dropped_names)} companies that scored below 5 after rescoring: "
+              f"{', '.join(sorted(dropped_names))}")
+    scored = [c for c in scored if c["name"] not in dropped_names]
+
+    # Merge: scored enriched companies + untouched uncertain ones (skipping dropped)
     scored_by_name = {c["name"]: c for c in scored}
-    all_results = [scored_by_name.get(c["name"], c) for c in triaged]
+    all_results = []
+    for c in triaged:
+        if c["name"] in dropped_names:
+            continue
+        all_results.append(scored_by_name.get(c["name"], c))
 
     # Step 6: Auto-categorize (optional)
     if config.get("auto_categorize") and all_results:

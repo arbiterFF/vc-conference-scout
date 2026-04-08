@@ -100,8 +100,17 @@
           </div>
         </div>
         <div id="ns-src-csv" class="hidden">
+          <div class="bg-amber-50 border border-amber-200 rounded p-3 text-xs text-amber-900 mb-2">
+            <strong>CSV format requirements:</strong>
+            <ul class="list-disc ml-4 mt-1 space-y-0.5">
+              <li>Comma-separated, with a header row in the very first line.</li>
+              <li>One column should contain the company names — name it <code>name</code>, <code>company</code>, <code>exhibitor</code>, <code>organization</code>, or <code>attendee</code>. The parser auto-detects which column to read.</li>
+              <li><strong>No leading empty columns or sheet-title rows.</strong> If you exported from Numbers/Excel, delete the auto-prepended title row first.</li>
+              <li>Other columns (descriptions, booth numbers, etc.) are ignored.</li>
+            </ul>
+          </div>
           <input id="ns-csv-file" type="file" accept=".csv,.txt" class="input" onchange="onCsvSelected()"/>
-          <p id="ns-csv-status" class="text-xs text-gray-500 mt-1">Upload a CSV or TXT file. The first column (or each line) is treated as a company name. Header rows like "name"/"company" are skipped.</p>
+          <p id="ns-csv-status" class="text-xs text-gray-500 mt-1">Upload a CSV or TXT file. The parser will tell you how many companies it found before you start the scan.</p>
         </div>
       </div>
       <div id="ns-profile-warn" class="hidden bg-yellow-50 border border-yellow-200 rounded p-3 text-sm text-yellow-800">
