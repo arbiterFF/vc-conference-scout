@@ -1,0 +1,850 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VC Conference Scout</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  .pill { display:inline-block; padding:4px 12px; border-radius:9999px; font-size:.875rem; cursor:pointer; border:1px solid; transition:all .15s; line-height:1.5; }
+  .pill-active { background:#7c3aed; color:white; border-color:#7c3aed; }
+  .pill-inactive { background:white; color:#4b5563; border-color:#d1d5db; }
+  .pill-inactive:hover { border-color:#a78bfa; }
+  .range-wrap { position:relative; width:10rem; height:1.5rem; }
+  .range-wrap input[type=range] { position:absolute; width:100%; top:0; pointer-events:none; -webkit-appearance:none; appearance:none; background:transparent; height:1.5rem; }
+  .range-wrap input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; pointer-events:all; width:16px; height:16px; border-radius:50%; background:#7c3aed; cursor:pointer; border:2px solid white; box-shadow:0 1px 3px rgba(0,0,0,.2); }
+  .range-track { position:absolute; top:50%; transform:translateY(-50%); height:4px; width:100%; background:#e5e7eb; border-radius:4px; pointer-events:none; }
+  .range-track-active { position:absolute; top:50%; transform:translateY(-50%); height:4px; background:#7c3aed; border-radius:4px; pointer-events:none; }
+  .btn { display:inline-flex; align-items:center; gap:.5rem; padding:.5rem 1rem; border-radius:.5rem; font-weight:500; transition:all .15s; cursor:pointer; }
+  .btn-primary { background:#7c3aed; color:white; border:1px solid #7c3aed; }
+  .btn-primary:hover { background:#6d28d9; }
+  .btn-secondary { background:white; color:#4b5563; border:1px solid #d1d5db; }
+  .btn-secondary:hover { border-color:#a78bfa; }
+  .input { width:100%; border:1px solid #d1d5db; border-radius:.5rem; padding:.5rem .75rem; font-size:.875rem; }
+  .input:focus { outline:none; border-color:#7c3aed; box-shadow:0 0 0 3px rgba(124,58,237,.1); }
+</style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+
+<!-- Top nav -->
+<nav class="bg-white border-b">
+  <div class="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
+    <a href="#/" class="flex items-center gap-2 text-xl font-bold text-gray-900">
+      <span class="text-violet-600">◆</span> VC Conference Scout
+    </a>
+    <div class="flex items-center gap-2">
+      <button class="btn btn-secondary" onclick="openSettings()">⚙ Settings</button>
+      <button class="btn btn-primary" onclick="openNewScan()">+ New Scan</button>
+    </div>
+  </div>
+</nav>
+
+<!-- Views -->
+<div id="view-home" class="hidden"></div>
+<div id="view-scan" class="hidden"></div>
+
+<!-- Modals -->
+<div id="modal-settings" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4" onclick="if(event.target===this)closeSettings()">
+  <div class="absolute inset-0 bg-black/40"></div>
+  <div class="relative bg-white rounded-2xl shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto p-6">
+    <h2 class="text-2xl font-bold text-gray-900 mb-1">Settings</h2>
+    <p class="text-sm text-gray-500 mb-6">Stored locally in your browser. Never sent to our server.</p>
+    <div class="space-y-4">
+      <div>
+        <label class="block text-sm font-semibold text-gray-700 mb-1">Anthropic API Key</label>
+        <div class="flex items-center gap-2">
+          <input id="setting-api-key" type="password" class="input flex-1" placeholder="sk-ant-..."/>
+          <button type="button" onclick="saveApiKey()" class="btn btn-secondary whitespace-nowrap" id="setting-key-btn">Save Key</button>
+        </div>
+        <p class="text-xs text-gray-500 mt-1">Get one at console.anthropic.com. Stored in browser localStorage.</p>
+      </div>
+      <div>
+        <label class="block text-sm font-semibold text-gray-700 mb-1">Your VC Profile / Thesis</label>
+        <textarea id="setting-profile" class="input" rows="6" placeholder="e.g. Acme Ventures, early-stage VC investing in vertical AI for healthcare..."></textarea>
+        <div class="flex items-center gap-2 mt-2">
+          <input id="setting-firm-url" type="url" class="input flex-1" placeholder="https://yourvcfirm.com"/>
+          <button onclick="extractProfile('setting')" class="btn btn-secondary whitespace-nowrap" id="setting-extract-btn">Extract from URL</button>
+        </div>
+        <p class="text-xs text-gray-500 mt-1">Describe what you invest in, or paste your firm's website URL and click Extract.</p>
+      </div>
+    </div>
+    <div class="flex gap-2 mt-6 pt-4 border-t">
+      <button onclick="saveSettings()" class="btn btn-primary">Save</button>
+      <button onclick="closeSettings()" class="btn btn-secondary">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<div id="modal-new-scan" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4" onclick="if(event.target===this)closeNewScan()">
+  <div class="absolute inset-0 bg-black/40"></div>
+  <div class="relative bg-white rounded-2xl shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto p-6">
+    <h2 class="text-2xl font-bold text-gray-900 mb-6">New Scan</h2>
+    <div class="space-y-4">
+      <div>
+        <label class="block text-sm font-semibold text-gray-700 mb-1">Scan Name</label>
+        <input id="ns-name" type="text" class="input" placeholder="e.g. HumanX 2026"/>
+      </div>
+      <div>
+        <label class="block text-sm font-semibold text-gray-700 mb-2">Source</label>
+        <div class="flex gap-2 mb-2">
+          <button type="button" id="ns-src-url-btn" onclick="setSourceMode('url')" class="pill pill-active">From URL</button>
+          <button type="button" id="ns-src-csv-btn" onclick="setSourceMode('csv')" class="pill pill-inactive">CSV upload</button>
+        </div>
+        <div id="ns-src-url">
+          <input id="ns-url" type="url" class="input" placeholder="https://example.com/attendees"/>
+          <button type="button" onclick="document.getElementById('ns-advanced').classList.toggle('hidden')" class="text-xs text-violet-600 hover:underline mt-2">▸ Advanced (CSS selector)</button>
+          <div id="ns-advanced" class="hidden mt-2">
+            <input id="ns-selector" type="text" class="input" placeholder="e.g. .company-name (leave blank for auto-detect)"/>
+            <p class="text-xs text-gray-500 mt-1">Optional. If auto-detect fails, inspect the page in your browser and provide a CSS selector pointing at company names.</p>
+          </div>
+        </div>
+        <div id="ns-src-csv" class="hidden">
+          <input id="ns-csv-file" type="file" accept=".csv,.txt" class="input" onchange="onCsvSelected()"/>
+          <p id="ns-csv-status" class="text-xs text-gray-500 mt-1">Upload a CSV or TXT file. The first column (or each line) is treated as a company name. Header rows like "name"/"company" are skipped.</p>
+        </div>
+      </div>
+      <div id="ns-profile-warn" class="hidden bg-yellow-50 border border-yellow-200 rounded p-3 text-sm text-yellow-800">
+        Set your VC Profile in <button class="underline" onclick="closeNewScan();openSettings()">Settings</button> first.
+      </div>
+      <div>
+        <label class="block text-sm font-semibold text-gray-700 mb-2">Categories</label>
+        <div class="flex gap-2 mb-2">
+          <button type="button" id="ns-cat-auto-btn" onclick="setCatMode('auto')" class="pill pill-active">Auto-generate</button>
+          <button type="button" id="ns-cat-manual-btn" onclick="setCatMode('manual')" class="pill pill-inactive">Manual</button>
+        </div>
+        <p id="ns-cat-auto-help" class="text-xs text-gray-500">Categories will be generated from the actual results after enrichment, tailored to this conference.</p>
+        <textarea id="ns-categories" class="input hidden mt-1" rows="6" placeholder="One category per line"></textarea>
+      </div>
+      <div id="ns-key-warn" class="hidden bg-yellow-50 border border-yellow-200 rounded p-3 text-sm text-yellow-800">
+        Set your Anthropic API key in <button class="underline" onclick="closeNewScan();openSettings()">Settings</button> first.
+      </div>
+    </div>
+    <div class="flex gap-2 mt-6 pt-4 border-t">
+      <button onclick="submitNewScan()" class="btn btn-primary">Start Scan</button>
+      <button onclick="closeNewScan()" class="btn btn-secondary">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Detail Modal (company card detail) -->
+<div id="modal-company" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4" onclick="if(event.target===this)closeCompanyModal()">
+  <div class="absolute inset-0 bg-black/40"></div>
+  <div class="relative bg-white rounded-2xl shadow-xl max-w-2xl w-full max-h-[85vh] overflow-y-auto p-6">
+    <button onclick="closeCompanyModal()" class="absolute top-4 right-4 text-gray-400 hover:text-gray-600 text-2xl leading-none">&times;</button>
+    <div id="company-modal-body"></div>
+  </div>
+</div>
+
+<script>
+// ===== Settings (localStorage) =====
+function getSettings() {
+  return {
+    apiKey: localStorage.getItem('vcs_api_key') || '',
+    profile: localStorage.getItem('vcs_profile') || '',
+  };
+}
+
+function openSettings() {
+  const s = getSettings();
+  document.getElementById('setting-api-key').value = s.apiKey;
+  document.getElementById('setting-profile').value = s.profile;
+  document.getElementById('modal-settings').classList.remove('hidden');
+}
+function closeSettings() { document.getElementById('modal-settings').classList.add('hidden'); }
+
+function saveApiKey() {
+  const key = document.getElementById('setting-api-key').value.trim();
+  if (!key) { alert('Enter an API key first.'); return; }
+  localStorage.setItem('vcs_api_key', key);
+  const btn = document.getElementById('setting-key-btn');
+  const orig = btn.textContent;
+  btn.textContent = '✓ Saved';
+  setTimeout(() => { btn.textContent = orig; }, 1500);
+}
+
+function saveSettings() {
+  localStorage.setItem('vcs_api_key', document.getElementById('setting-api-key').value.trim());
+  localStorage.setItem('vcs_profile', document.getElementById('setting-profile').value.trim());
+  closeSettings();
+}
+
+// ===== Profile extraction =====
+async function extractProfile(prefix) {
+  // Read key from the live Settings input if it's open, otherwise localStorage
+  const liveKey = document.getElementById('setting-api-key').value.trim();
+  const apiKey = liveKey || localStorage.getItem('vcs_api_key') || '';
+  if (!apiKey) { alert('Enter your Anthropic API key first.'); return; }
+  const url = document.getElementById(prefix + '-firm-url').value.trim();
+  if (!url) { alert('Enter your VC firm website URL first.'); return; }
+  const btn = document.getElementById(prefix + '-extract-btn');
+  const orig = btn.textContent;
+  btn.textContent = 'Extracting...';
+  btn.disabled = true;
+  try {
+    const res = await fetch('/api/extract-profile', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, api_key: apiKey }),
+    });
+    if (!res.ok) throw new Error((await res.json()).error || 'Failed');
+    const { profile } = await res.json();
+    document.getElementById(prefix + '-profile').value = profile;
+  } catch (e) {
+    alert('Error: ' + e.message);
+  } finally {
+    btn.textContent = orig;
+    btn.disabled = false;
+  }
+}
+
+// ===== New Scan =====
+let nsSourceMode = 'url';
+let nsCsvCompanies = [];
+function setSourceMode(mode) {
+  nsSourceMode = mode;
+  document.getElementById('ns-src-url-btn').className = mode==='url' ? 'pill pill-active' : 'pill pill-inactive';
+  document.getElementById('ns-src-csv-btn').className = mode==='csv' ? 'pill pill-active' : 'pill pill-inactive';
+  document.getElementById('ns-src-url').classList.toggle('hidden', mode!=='url');
+  document.getElementById('ns-src-csv').classList.toggle('hidden', mode!=='csv');
+}
+
+function parseCsv(text) {
+  // Simple parser: take first comma-separated field of each line, handle quotes
+  const lines = text.split(/\r?\n/);
+  const out = [];
+  for (let line of lines) {
+    line = line.trim();
+    if (!line) continue;
+    let name;
+    if (line.startsWith('"')) {
+      const m = line.match(/^"((?:[^"]|"")*)"/);
+      name = m ? m[1].replace(/""/g, '"') : line;
+    } else {
+      name = line.split(',')[0];
+    }
+    name = name.trim();
+    if (name) out.push(name);
+  }
+  // Skip header row if it looks like one
+  if (out.length && /^(name|company|company name|organization|exhibitor)$/i.test(out[0])) {
+    out.shift();
+  }
+  // Dedupe
+  const seen = new Set();
+  return out.filter(n => {
+    const k = n.toLowerCase();
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+}
+
+function onCsvSelected() {
+  const file = document.getElementById('ns-csv-file').files[0];
+  if (!file) { nsCsvCompanies = []; return; }
+  const reader = new FileReader();
+  reader.onload = e => {
+    nsCsvCompanies = parseCsv(e.target.result);
+    document.getElementById('ns-csv-status').textContent = `Parsed ${nsCsvCompanies.length} companies from ${file.name}`;
+  };
+  reader.readAsText(file);
+}
+
+let nsCatMode = 'auto';
+function setCatMode(mode) {
+  nsCatMode = mode;
+  document.getElementById('ns-cat-auto-btn').className = mode==='auto' ? 'pill pill-active' : 'pill pill-inactive';
+  document.getElementById('ns-cat-manual-btn').className = mode==='manual' ? 'pill pill-active' : 'pill pill-inactive';
+  document.getElementById('ns-cat-auto-help').classList.toggle('hidden', mode!=='auto');
+  document.getElementById('ns-categories').classList.toggle('hidden', mode!=='manual');
+}
+
+function openNewScan() {
+  const s = getSettings();
+  document.getElementById('ns-name').value = '';
+  document.getElementById('ns-url').value = '';
+  document.getElementById('ns-selector').value = '';
+  document.getElementById('ns-categories').value = '';
+  document.getElementById('ns-advanced').classList.add('hidden');
+  document.getElementById('ns-csv-file').value = '';
+  document.getElementById('ns-csv-status').textContent = 'Upload a CSV or TXT file. The first column (or each line) is treated as a company name.';
+  nsCsvCompanies = [];
+  setSourceMode('url');
+  setCatMode('auto');
+  document.getElementById('ns-key-warn').classList.toggle('hidden', !!s.apiKey);
+  document.getElementById('ns-profile-warn').classList.toggle('hidden', !!s.profile);
+  document.getElementById('modal-new-scan').classList.remove('hidden');
+}
+function closeNewScan() { document.getElementById('modal-new-scan').classList.add('hidden'); }
+
+async function submitNewScan() {
+  const s = getSettings();
+  if (!s.apiKey) { alert('Set your Anthropic API key in Settings first.'); return; }
+  if (!s.profile) { alert('Set your VC Profile in Settings first.'); return; }
+  const name = document.getElementById('ns-name').value.trim();
+  const profile = s.profile;
+  if (!name) { alert('Please fill in a scan name.'); return; }
+
+  let url = '', selector = '', companies = null;
+  if (nsSourceMode === 'url') {
+    url = document.getElementById('ns-url').value.trim();
+    selector = document.getElementById('ns-selector').value.trim();
+    if (!url) { alert('Please provide a conference URL.'); return; }
+  } else {
+    if (!nsCsvCompanies.length) { alert('Upload a CSV file with company names first.'); return; }
+    companies = nsCsvCompanies;
+  }
+
+  let categories = [];
+  let auto_categorize = false;
+  if (nsCatMode === 'auto') {
+    auto_categorize = true;
+    // Provide a temporary placeholder so classify step has something to bucket into;
+    // these will be replaced after enrichment.
+    categories = ['Pending'];
+  } else {
+    categories = document.getElementById('ns-categories').value.split('\n').map(x=>x.trim()).filter(Boolean);
+    if (!categories.length) { alert('Add at least one category, or switch to Auto-generate.'); return; }
+  }
+
+  try {
+    const res = await fetch('/api/scans', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, url, selector, companies, profile, categories, auto_categorize, api_key: s.apiKey }),
+    });
+    if (!res.ok) throw new Error((await res.json()).error || 'Failed');
+    const { id } = await res.json();
+    closeNewScan();
+    location.hash = '#/scan/' + id;
+  } catch (e) {
+    alert('Error: ' + e.message);
+  }
+}
+
+// ===== Routing =====
+function route() {
+  const hash = location.hash || '#/';
+  document.getElementById('view-home').classList.add('hidden');
+  document.getElementById('view-scan').classList.add('hidden');
+  if (hash === '#/' || hash === '') {
+    renderHome();
+  } else if (hash.startsWith('#/scan/')) {
+    const id = hash.slice('#/scan/'.length);
+    renderScan(id);
+  }
+}
+window.addEventListener('hashchange', route);
+
+// ===== Home view =====
+async function renderHome() {
+  const view = document.getElementById('view-home');
+  view.classList.remove('hidden');
+  view.innerHTML = '<div class="max-w-7xl mx-auto px-6 py-8"><p class="text-gray-500">Loading scans...</p></div>';
+
+  try {
+    const res = await fetch('/api/scans');
+    const scans = await res.json();
+    view.innerHTML = `
+      <div class="max-w-7xl mx-auto px-6 py-8">
+        <div class="mb-6">
+          <h1 class="text-3xl font-bold text-gray-900">Your Scans</h1>
+          <p class="text-gray-500 mt-1">${scans.length} scan${scans.length===1?'':'s'}</p>
+        </div>
+        ${scans.length === 0 ? `
+          <div class="bg-white rounded-xl border p-12 text-center">
+            <p class="text-gray-500 mb-4">No scans yet.</p>
+            <button class="btn btn-primary" onclick="openNewScan()">+ Create your first scan</button>
+          </div>
+        ` : `
+          <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            ${scans.map(s => renderScanCard(s)).join('')}
+          </div>
+        `}
+      </div>
+    `;
+  } catch (e) {
+    view.innerHTML = '<div class="max-w-7xl mx-auto px-6 py-8"><p class="text-red-500">Error loading scans: ' + e.message + '</p></div>';
+  }
+}
+
+function renderScanCard(s) {
+  const isDone = s.stage === 'done' || s.completed_at;
+  const statusBg = isDone ? 'bg-green-100 text-green-800' : (s.stage === 'error' ? 'bg-red-100 text-red-800' : 'bg-yellow-100 text-yellow-800');
+  const statusLabel = isDone ? 'Complete' : (s.stage_label || s.stage || 'Running');
+  return `
+    <a href="#/scan/${s.id}" class="block bg-white rounded-xl border p-5 hover:shadow-md transition-shadow relative">
+      <button onclick="event.preventDefault();event.stopPropagation();deleteScan('${s.id}', '${(s.name||'').replace(/'/g,"\\'")}')" class="absolute top-3 right-3 text-gray-300 hover:text-red-500" title="Delete">&times;</button>
+      <h3 class="font-semibold text-gray-900 text-lg pr-6">${s.name}</h3>
+      <p class="text-xs text-gray-500 truncate mt-1">${s.url}</p>
+      <div class="flex flex-wrap gap-1.5 mt-3">
+        <span class="text-xs px-2 py-0.5 rounded-full ${statusBg}">${statusLabel}${!isDone && s.percent ? ' '+s.percent+'%' : ''}</span>
+        ${s.relevant_matches ? `<span class="text-xs px-2 py-0.5 rounded-full bg-violet-100 text-violet-700">${s.relevant_matches} matches</span>` : ''}
+        ${s.total_scraped ? `<span class="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-600">${s.total_scraped} scraped</span>` : ''}
+      </div>
+    </a>
+  `;
+}
+
+async function deleteScan(id, name) {
+  if (!confirm(`Delete scan "${name}"? This cannot be undone.`)) return;
+  await fetch('/api/scans/' + id, { method: 'DELETE' });
+  renderHome();
+}
+
+// ===== Scan Detail view =====
+let currentScanId = null;
+let allData = [];
+let starred = {};
+let activeCategories = new Set();
+let activeStages = new Set();
+let starredOnly = false;
+let sortAsc = false;
+let progressInterval = null;
+
+async function renderScan(id) {
+  currentScanId = id;
+  const view = document.getElementById('view-scan');
+  view.classList.remove('hidden');
+
+  // Render scan detail shell (the existing UI)
+  view.innerHTML = `
+    <div id="progress-banner" class="hidden bg-violet-600 text-white px-6 py-3">
+      <div class="max-w-7xl mx-auto flex items-center gap-3">
+        <svg class="animate-spin h-5 w-5" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" fill="none"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"/></svg>
+        <span id="progress-label">Starting...</span>
+        <div class="flex-1 bg-violet-400 rounded-full h-2 ml-4"><div id="progress-bar" class="bg-white rounded-full h-2 transition-all" style="width:0%"></div></div>
+        <span id="progress-pct" class="text-sm font-mono">0%</span>
+      </div>
+    </div>
+    <div class="max-w-7xl mx-auto px-6 py-8">
+      <div class="mb-4"><a href="#/" class="text-sm text-violet-600 hover:underline">&larr; Back to scans</a></div>
+      <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6">
+        <div>
+          <h1 id="scan-title" class="text-3xl font-bold text-gray-900">Loading...</h1>
+          <p id="stats" class="text-gray-500 mt-1"></p>
+        </div>
+        <input id="search" type="text" placeholder="Search companies..." class="input sm:w-72"/>
+      </div>
+      <div class="bg-white rounded-xl shadow-sm border p-5 mb-6 space-y-4">
+        <div class="flex items-center gap-2 flex-wrap">
+          <button id="starred-filter" class="pill pill-inactive inline-flex items-center gap-1" onclick="toggleStarredFilter()">
+            <span style="color:#eab308">&#9733;</span> Starred (<span id="starred-count">0</span>)
+          </button>
+          <button class="pill pill-inactive" onclick="clearAllFilters()">Show All</button>
+          <div class="flex-1"></div>
+          <button onclick="exportStarred()" class="pill pill-inactive">&#8595; Export Starred</button>
+        </div>
+        <div><label class="text-xs font-semibold text-gray-400 uppercase tracking-wider">Categories</label><div id="category-pills" class="flex flex-wrap gap-2 mt-1"></div></div>
+        <div><label class="text-xs font-semibold text-gray-400 uppercase tracking-wider">Stage</label><div id="stage-pills" class="flex flex-wrap gap-2 mt-1"></div></div>
+        <div class="flex flex-col sm:flex-row gap-4 items-start sm:items-center flex-wrap">
+          <div class="flex items-center gap-2">
+            <label class="text-sm text-gray-600">Score:</label>
+            <div class="range-wrap"><div class="range-track"></div><div id="score-track-active" class="range-track-active" style="left:0%;right:0%"></div>
+              <input id="score-lo" type="range" min="5" max="10" value="5" oninput="onScoreRange()"/>
+              <input id="score-hi" type="range" min="5" max="10" value="10" oninput="onScoreRange()"/>
+            </div>
+            <span id="score-val" class="text-sm font-mono text-gray-700">5 – 10</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <label class="text-sm text-gray-600">Funding:</label>
+            <div class="range-wrap"><div class="range-track"></div><div id="funding-track-active" class="range-track-active" style="left:0%;right:0%"></div>
+              <input id="funding-lo" type="range" min="0" max="9" value="0" oninput="onFundingRange()"/>
+              <input id="funding-hi" type="range" min="0" max="9" value="9" oninput="onFundingRange()"/>
+            </div>
+            <span id="funding-val" class="text-sm font-mono text-gray-700">Any</span>
+          </div>
+        </div>
+        <div class="flex items-center gap-2">
+          <label class="text-sm text-gray-600">Sort by:</label>
+          <select id="sort-by" class="border rounded px-2 py-1 text-sm" onchange="render()">
+            <option value="relevance">Score</option><option value="name">Name</option>
+            <option value="funding">Funding</option><option value="stage">Stage</option><option value="founded">Founded</option>
+          </select>
+          <button id="sort-dir-btn" class="border rounded px-2 py-1 text-sm cursor-pointer hover:bg-gray-100" onclick="toggleSortDir()">&#9660;</button>
+        </div>
+      </div>
+      <div id="cards" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4"></div>
+      <p id="no-results" class="hidden text-center text-gray-400 py-12 text-lg">No companies match your filters.</p>
+    </div>
+  `;
+
+  // Wire search/sort change handlers
+  document.getElementById('search').addEventListener('input', render);
+  document.getElementById('sort-by').addEventListener('change', () => {
+    const v = document.getElementById('sort-by').value;
+    sortAsc = (v === 'name' || v === 'stage' || v === 'founded');
+    document.getElementById('sort-dir-btn').textContent = sortAsc ? '\u25B2' : '\u25BC';
+  });
+
+  await loadScanData(id);
+
+  if (progressInterval) clearInterval(progressInterval);
+  progressInterval = setInterval(() => pollProgress(id), 2000);
+  pollProgress(id);
+}
+
+async function loadScanData(id) {
+  try {
+    const res = await fetch('/api/scans/' + id);
+    if (!res.ok) throw new Error('Scan not found');
+    const data = await res.json();
+    document.getElementById('scan-title').textContent = data.config.name || id;
+    starred = data.starred || {};
+    allData = (data.results.results || []).map(d => ({
+      ...d,
+      _fundingNum: parseFunding(d.funding),
+      _stage: normalizeStage(d.stage || d.type),
+    }));
+    updateStarredCount();
+    buildFilters();
+    render();
+  } catch (e) {
+    document.getElementById('stats').textContent = 'Error: ' + e.message;
+  }
+}
+
+async function pollProgress(id) {
+  try {
+    const res = await fetch('/api/scans/' + id + '/progress');
+    const p = await res.json();
+    const banner = document.getElementById('progress-banner');
+    if (!banner) return;
+    if (p.stage === 'done' || !p.stage) {
+      banner.classList.add('hidden');
+      if (p.stage === 'done' && progressInterval) {
+        clearInterval(progressInterval);
+        progressInterval = null;
+        loadScanData(id);
+      }
+      return;
+    }
+    banner.classList.remove('hidden');
+    document.getElementById('progress-label').textContent = p.stage_label || p.stage;
+    document.getElementById('progress-bar').style.width = (p.percent || 0) + '%';
+    document.getElementById('progress-pct').textContent = (p.percent || 0) + '%';
+    // Reload data periodically as new matches stream in
+    if (p.stage === 'classifying' || p.stage === 'enriching') {
+      loadScanData(id);
+    }
+  } catch {}
+}
+
+// ===== Stage / funding helpers =====
+function normalizeStage(raw) {
+  if (!raw) return 'Unknown';
+  const s = raw.toLowerCase().replace(/[()]/g, '');
+  if (/acquired|acquisition/i.test(s)) return 'Acquired';
+  if (/public|ipo|nyse|nasdaq|spac/i.test(s)) return 'Public';
+  if (/series\s*f/i.test(s)) return 'Series F';
+  if (/series\s*e/i.test(s)) return 'Series E';
+  if (/series\s*d/i.test(s)) return 'Series D';
+  if (/series\s*c/i.test(s)) return 'Series C';
+  if (/series\s*b/i.test(s)) return 'Series B';
+  if (/series\s*a/i.test(s)) return 'Series A';
+  if (/pre.?a/i.test(s)) return 'Pre-A';
+  if (/pre.?seed/i.test(s)) return 'Pre-seed';
+  if (/angel/i.test(s)) return 'Pre-seed';
+  if (/seed/i.test(s)) return 'Seed';
+  if (/bootstrap|self.?fund|unfund|stealth/i.test(s)) return 'Bootstrapped';
+  if (/growth|unicorn|late.?stage|private equity|pe.?back/i.test(s)) return 'Growth';
+  if (/early|launch|grant|incubat|accelerat/i.test(s)) return 'Early Stage';
+  if (/private|not\s|n\/a|unknown|information|not specified/i.test(s)) return 'Unknown';
+  if (/startup/i.test(s)) return 'Early Stage';
+  if (/mature/i.test(s)) return 'Growth';
+  return 'Unknown';
+}
+
+const FUNDING_STEPS = [0, 0.1, 0.5, 1, 5, 10, 25, 50, 100, 250, Infinity];
+const FUNDING_LABELS = ['Any','$100K','$500K','$1M','$5M','$10M','$25M','$50M','$100M','$250M+'];
+
+function parseFunding(s) {
+  if (!s) return null;
+  s = s.replace(/,/g, '');
+  const m = s.match(/\$([\d.]+)\s*(billion|B|million|M|K|thousand)?/i);
+  if (!m) return null;
+  let val = parseFloat(m[1]);
+  let unit = (m[2] || '').toUpperCase();
+  if (!unit) {
+    const range = s.match(/\$([\d.]+)\s*[-–]\s*\$?([\d.]+)\s*(billion|B|million|M|K|thousand)/i);
+    if (range) unit = range[3].toUpperCase();
+  }
+  if (unit === 'BILLION' || unit === 'B') return val * 1000;
+  if (unit === 'MILLION' || unit === 'M') return val;
+  if (unit === 'K' || unit === 'THOUSAND') return val / 1000;
+  if (val >= 1000000) return val / 1000000;
+  if (val >= 1000) return val / 1000000;
+  return val;
+}
+
+function formatFunding(numM) {
+  if (numM == null) return '';
+  if (numM >= 1000) return '$' + (numM / 1000).toFixed(1).replace(/\.0$/, '') + 'B';
+  if (numM >= 1) return '$' + numM.toFixed(1).replace(/\.0$/, '') + 'M';
+  return '$' + Math.round(numM * 1000) + 'K';
+}
+
+// ===== Filters =====
+function buildFilters() {
+  const categories = [...new Set(allData.map(d => d.category).filter(Boolean))].sort();
+  const stageOrder = ['Pre-seed','Seed','Early Stage','Pre-A','Series A','Series B','Series C','Series D','Series E','Series F','Growth','Public','Acquired','Bootstrapped','Unknown'];
+  const stages = stageOrder.filter(s => allData.some(d => d._stage === s));
+
+  const catContainer = document.getElementById('category-pills');
+  catContainer.innerHTML = '';
+  categories.forEach(cat => {
+    const btn = document.createElement('button');
+    btn.className = 'pill pill-inactive';
+    btn.dataset.filter = cat;
+    btn.onclick = () => toggleFilter('category', cat);
+    catContainer.appendChild(btn);
+  });
+
+  const stageContainer = document.getElementById('stage-pills');
+  stageContainer.innerHTML = '';
+  stages.forEach(s => {
+    const btn = document.createElement('button');
+    btn.className = 'pill pill-inactive';
+    btn.dataset.filter = s;
+    btn.onclick = () => toggleFilter('stage', s);
+    stageContainer.appendChild(btn);
+  });
+}
+
+function updatePillCounts() {
+  document.querySelectorAll('#category-pills .pill').forEach(btn => {
+    const cat = btn.dataset.filter;
+    const count = allData.filter(d => d.category === cat).length;
+    btn.textContent = cat + ' (' + count + ')';
+    btn.className = activeCategories.has(cat) ? 'pill pill-active' : 'pill pill-inactive';
+  });
+  document.querySelectorAll('#stage-pills .pill').forEach(btn => {
+    const s = btn.dataset.filter;
+    const count = allData.filter(d => d._stage === s).length;
+    btn.textContent = s + ' (' + count + ')';
+    btn.className = activeStages.has(s) ? 'pill pill-active' : 'pill pill-inactive';
+  });
+}
+
+function toggleFilter(type, value) {
+  const set = type === 'category' ? activeCategories : activeStages;
+  if (set.has(value)) set.delete(value); else set.add(value);
+  render();
+}
+
+function toggleStarredFilter() {
+  starredOnly = !starredOnly;
+  const btn = document.getElementById('starred-filter');
+  btn.className = starredOnly ? 'pill pill-active inline-flex items-center gap-1' : 'pill pill-inactive inline-flex items-center gap-1';
+  render();
+}
+
+function clearAllFilters() {
+  activeCategories.clear();
+  activeStages.clear();
+  starredOnly = false;
+  document.getElementById('search').value = '';
+  document.getElementById('score-lo').value = 5;
+  document.getElementById('score-hi').value = 10;
+  document.getElementById('score-val').textContent = '5 – 10';
+  document.getElementById('score-track-active').style.left = '0%';
+  document.getElementById('score-track-active').style.right = '0%';
+  document.getElementById('funding-lo').value = 0;
+  document.getElementById('funding-hi').value = 9;
+  document.getElementById('funding-val').textContent = 'Any';
+  document.getElementById('funding-track-active').style.left = '0%';
+  document.getElementById('funding-track-active').style.right = '0%';
+  document.getElementById('starred-filter').className = 'pill pill-inactive inline-flex items-center gap-1';
+  render();
+}
+
+// ===== Star / save =====
+function toggleStar(name) {
+  if (starred[name]) delete starred[name]; else starred[name] = true;
+  fetch('/api/scans/' + currentScanId + '/star', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(starred),
+  }).catch(()=>{});
+  updateStarredCount();
+  render();
+}
+
+function updateStarredCount() {
+  const el = document.getElementById('starred-count');
+  if (el) el.textContent = Object.keys(starred).length;
+}
+
+function exportStarred() {
+  const items = allData.filter(d => starred[d.name]);
+  if (!items.length) { alert('No starred companies to export.'); return; }
+  const headers = ['name','category','stage','funding','relevance','url','reason'];
+  const csv = [headers.join(',')];
+  items.forEach(d => {
+    csv.push(headers.map(h => '"' + String(d[h]||'').replace(/"/g,'""') + '"').join(','));
+  });
+  const blob = new Blob([csv.join('\n')], { type: 'text/csv' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = (currentScanId || 'scout') + '_starred.csv';
+  a.click();
+}
+
+// ===== Render =====
+function render() {
+  const query = (document.getElementById('search')?.value || '').toLowerCase();
+  const scoreLo = parseInt(document.getElementById('score-lo').value);
+  const scoreHi = parseInt(document.getElementById('score-hi').value);
+  const fundingLo = parseInt(document.getElementById('funding-lo').value);
+  const fundingHi = parseInt(document.getElementById('funding-hi').value);
+
+  let filtered = allData.filter(d => {
+    if (d.relevance < scoreLo || d.relevance > scoreHi) return false;
+    if (starredOnly && !starred[d.name]) return false;
+    if (activeCategories.size && !activeCategories.has(d.category)) return false;
+    if (activeStages.size && !activeStages.has(d._stage)) return false;
+    if (fundingLo > 0 || fundingHi < 9) {
+      if (d._fundingNum == null) return false;
+      if (fundingLo > 0 && d._fundingNum < FUNDING_STEPS[fundingLo]) return false;
+      if (fundingHi < 9 && d._fundingNum > FUNDING_STEPS[fundingHi + 1]) return false;
+    }
+    if (query) {
+      const text = [d.name, d.description, d.reason, d.category, d.stage, d.type].join(' ').toLowerCase();
+      if (!text.includes(query)) return false;
+    }
+    return true;
+  });
+
+  const STAGE_ORDER = {'Pre-seed':0,'Seed':1,'Early Stage':2,'Pre-A':3,'Series A':4,'Series B':5,'Series C':6,'Series D':7,'Series E':8,'Series F':9,'Growth':10,'Public':11,'Acquired':12,'Bootstrapped':13,'Unknown':14};
+  const sortBy = document.getElementById('sort-by').value;
+  const dir = sortAsc ? 1 : -1;
+  filtered.sort((a, b) => {
+    let cmp = 0;
+    switch (sortBy) {
+      case 'relevance': cmp = (a.relevance||0) - (b.relevance||0); break;
+      case 'name': cmp = (a.name||'').localeCompare(b.name||''); break;
+      case 'funding': cmp = (a._fundingNum||0) - (b._fundingNum||0); break;
+      case 'stage': cmp = (STAGE_ORDER[a._stage]??99) - (STAGE_ORDER[b._stage]??99); break;
+      case 'founded': cmp = (parseInt(a.founded)||9999) - (parseInt(b.founded)||9999); break;
+    }
+    return cmp * dir;
+  });
+
+  document.getElementById('stats').textContent = `Showing ${filtered.length} of ${allData.length} companies`;
+  const container = document.getElementById('cards');
+  const noResults = document.getElementById('no-results');
+
+  if (!filtered.length) {
+    container.innerHTML = '';
+    noResults.classList.remove('hidden');
+    return;
+  }
+  noResults.classList.add('hidden');
+
+  container.innerHTML = filtered.map(d => {
+    const isStarred = starred[d.name];
+    const desc = d.description || d.reason || '';
+    const scoreBg = d.relevance >= 9 ? 'bg-green-100 text-green-800' : d.relevance >= 7 ? 'bg-yellow-100 text-yellow-800' : 'bg-gray-100 text-gray-700';
+    const nameEsc = d.name.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+    return `<div class="bg-white rounded-xl shadow-sm border p-5 flex flex-col relative hover:shadow-md transition-shadow cursor-pointer" onclick="openCompanyModal('${nameEsc}')">
+      <button onclick="event.stopPropagation();toggleStar('${nameEsc}')" class="absolute top-3 right-3 text-xl leading-none ${isStarred?'text-yellow-500':'text-gray-300 hover:text-yellow-400'}">${isStarred?'&#9733;':'&#9734;'}</button>
+      <div class="flex items-start gap-2 pr-8"><h3 class="font-semibold text-gray-900 text-lg leading-tight">${d.name}</h3></div>
+      <div class="flex flex-wrap gap-1.5 mt-2">
+        <span class="text-xs font-semibold px-2 py-0.5 rounded-full ${scoreBg}">${d.relevance}/10</span>
+        ${d.category?`<span class="text-xs px-2 py-0.5 rounded-full bg-violet-100 text-violet-700">${d.category}</span>`:''}
+        ${d._stage?`<span class="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-600">${d._stage}</span>`:''}
+        ${d._fundingNum!=null?`<span class="text-xs px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700">${formatFunding(d._fundingNum)}</span>`:''}
+      </div>
+      <p class="text-sm text-gray-600 mt-3 flex-1 line-clamp-3">${desc}</p>
+      ${d.url?`<a href="${d.url}" target="_blank" rel="noopener" class="text-sm text-violet-600 hover:underline mt-3 truncate" onclick="event.stopPropagation()">${d.url}</a>`:''}
+    </div>`;
+  }).join('');
+
+  updatePillCounts();
+}
+
+// ===== Company modal =====
+function openCompanyModal(name) {
+  const d = allData.find(c => c.name === name);
+  if (!d) return;
+  const isStarred = starred[d.name];
+  const scoreBg = d.relevance >= 9 ? 'bg-green-100 text-green-800' : d.relevance >= 7 ? 'bg-yellow-100 text-yellow-800' : 'bg-gray-100 text-gray-700';
+  const nameEsc = d.name.replace(/'/g, "\\'");
+  const row = (l, v) => v ? `<div class="flex gap-2"><span class="text-gray-400 w-24 shrink-0">${l}</span><span class="text-gray-800">${v}</span></div>` : '';
+  document.getElementById('company-modal-body').innerHTML = `
+    <div class="flex items-start gap-3 mb-4 pr-16">
+      <button onclick="toggleStar('${nameEsc}');openCompanyModal('${nameEsc}')" class="text-2xl leading-none mt-1 ${isStarred?'text-yellow-500':'text-gray-300 hover:text-yellow-400'}">${isStarred?'&#9733;':'&#9734;'}</button>
+      <div>
+        <h2 class="text-2xl font-bold text-gray-900">${d.name}</h2>
+        <div class="flex flex-wrap gap-1.5 mt-2">
+          <span class="text-xs font-semibold px-2 py-0.5 rounded-full ${scoreBg}">${d.relevance}/10</span>
+          ${d.category?`<span class="text-xs px-2 py-0.5 rounded-full bg-violet-100 text-violet-700">${d.category}</span>`:''}
+          ${d._stage?`<span class="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-600">${d._stage}</span>`:''}
+        </div>
+      </div>
+    </div>
+    <div class="space-y-2 text-sm mb-4">
+      ${row('Founded', d.founded)}${row('HQ', d.hq)}${row('Funding', d.funding)}${row('Stage', d.stage || d.type || '')}
+    </div>
+    ${d.description?`<div class="mb-4"><h3 class="text-xs font-semibold text-gray-400 uppercase mb-1">Description</h3><p class="text-gray-700">${d.description}</p></div>`:''}
+    ${d.reason?`<div class="mb-4"><h3 class="text-xs font-semibold text-gray-400 uppercase mb-1">Why Relevant</h3><p class="text-gray-700">${d.reason}</p></div>`:''}
+    ${d.innovation?`<div class="mb-4"><h3 class="text-xs font-semibold text-gray-400 uppercase mb-1">Innovation</h3><p class="text-gray-700">${d.innovation}</p></div>`:''}
+    ${d.url?`<a href="${d.url}" target="_blank" rel="noopener" class="text-violet-600 hover:underline text-sm">${d.url}</a>`:''}
+    <div class="flex gap-2 mt-6 pt-4 border-t">
+      <button onclick="deleteCompany('${nameEsc}')" class="pill pill-inactive" style="color:#ef4444;border-color:#fca5a5">Delete</button>
+    </div>
+  `;
+  document.getElementById('modal-company').classList.remove('hidden');
+}
+
+function closeCompanyModal() { document.getElementById('modal-company').classList.add('hidden'); }
+document.addEventListener('keydown', e => { if (e.key === 'Escape') { closeCompanyModal(); closeSettings(); closeNewScan(); } });
+
+async function deleteCompany(name) {
+  if (!confirm(`Delete "${name}" from this scan?`)) return;
+  await fetch('/api/scans/' + currentScanId + '/delete-company', {
+    method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({name}),
+  });
+  allData = allData.filter(d => d.name !== name);
+  if (starred[name]) { delete starred[name]; updateStarredCount(); }
+  closeCompanyModal();
+  render();
+}
+
+// ===== Sliders =====
+function toggleSortDir() {
+  sortAsc = !sortAsc;
+  document.getElementById('sort-dir-btn').textContent = sortAsc ? '\u25B2' : '\u25BC';
+  render();
+}
+
+function onScoreRange() {
+  let lo = parseInt(document.getElementById('score-lo').value);
+  let hi = parseInt(document.getElementById('score-hi').value);
+  if (lo > hi) { document.getElementById('score-lo').value = hi; document.getElementById('score-hi').value = lo; [lo,hi]=[hi,lo]; }
+  document.getElementById('score-track-active').style.left = ((lo-5)/5*100)+'%';
+  document.getElementById('score-track-active').style.right = (100-(hi-5)/5*100)+'%';
+  document.getElementById('score-val').textContent = lo===5&&hi===10 ? '5 – 10' : lo+' – '+hi;
+  render();
+}
+
+function onFundingRange() {
+  let lo = parseInt(document.getElementById('funding-lo').value);
+  let hi = parseInt(document.getElementById('funding-hi').value);
+  if (lo > hi) { document.getElementById('funding-lo').value = hi; document.getElementById('funding-hi').value = lo; [lo,hi]=[hi,lo]; }
+  document.getElementById('funding-track-active').style.left = (lo/9*100)+'%';
+  document.getElementById('funding-track-active').style.right = (100-hi/9*100)+'%';
+  if (lo===0 && hi===9) document.getElementById('funding-val').textContent = 'Any';
+  else {
+    const loLabel = lo===0?'$0':FUNDING_LABELS[lo].replace('+','');
+    const hiLabel = hi===9?'Any':FUNDING_LABELS[hi].replace('+','');
+    document.getElementById('funding-val').textContent = loLabel+' – '+hiLabel;
+  }
+  render();
+}
+
+// ===== Init =====
+route();
+</script>
+</body>
+</html>

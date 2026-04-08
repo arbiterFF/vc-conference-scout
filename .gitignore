@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.env
+.DS_Store
+
+# Per-scan runtime artifacts (don't commit other VCs' data)
+scans/*/results.json
+scans/*/starred.json
+scans/*/progress.json
+scans/*/companies.json
+scans/*/scout.log
+scans/*/config.json
+
+# But keep the scans/ folder structure
+!scans/.gitkeep
