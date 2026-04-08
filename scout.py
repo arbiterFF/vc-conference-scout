@@ -202,12 +202,16 @@ def batch_triage(companies, config, scan_dir, started_at, batch_size=200):
                        batch_num, total_batches, started_at, {"matches_so_far": len(all_results)})
         print(f"\nTriage batch {batch_num}/{total_batches}: {len(batch)} companies...")
 
+        synopsis_block = ""
+        if config.get("synopsis"):
+            synopsis_block = f"\nCONFERENCE CONTEXT:\n{config['synopsis']}\n"
+
         prompt = f"""You are doing a CHEAP first-pass triage of conference attendees for a VC. We will enrich and re-score the survivors later with real descriptions, so be PERMISSIVE here — only drop the obvious mismatches.
 
 VC PROFILE / THESIS:
 {profile}
-
-For each company below, judge based on the NAME ALONE:
+{synopsis_block}
+For each company below, judge based on the NAME ALONE (use the conference context above to disambiguate generic names — e.g., at a maritime conference "Keel" almost certainly means a maritime company, not a beer company):
 - DROP it if the name clearly indicates a mature corporate (Fortune 500), bank, ad agency, consulting firm, association, university, government body, or VC fund.
 - KEEP it (with relevance 3-10) if the name COULD be relevant to the VC's thesis, OR if you can't tell from the name (unknown / generic name).
 
@@ -258,14 +262,62 @@ Respond ONLY with the JSON array. If nothing kept, return []."""
     return all_results
 
 
+# ---------- Synopsis (pipeline context) ----------
+
+def generate_synopsis(config, scan_dir, started_at):
+    """One-shot Claude call: produce a 2-3 sentence description of the conference,
+    used downstream as disambiguation context for ambiguous company names."""
+    api_key = config["api_key"]
+    name = config.get("name", "this conference")
+    url = config.get("url", "")
+    write_progress(scan_dir, "synopsis", f"Generating conference synopsis for {name}",
+                   started_at=started_at)
+    print(f"\nGenerating synopsis for {name}...")
+
+    prompt = f"""Describe this conference in 2-3 sentences for downstream context.
+
+Conference name: {name}
+Conference URL: {url or "(no URL — companies were uploaded as CSV)"}
+
+Cover: sector/industry, typical attendee type, and the kinds of companies that attend. Be specific and factual. If you don't know this specific conference, infer reasonably from the name. No preamble, no markdown — just the description."""
+
+    try:
+        result = call_claude(api_key, {
+            "model": "claude-sonnet-4-5-20250929",
+            "max_tokens": 400,
+            "messages": [{"role": "user", "content": prompt}],
+        })
+        text_parts = [b["text"] for b in result["content"] if b.get("type") == "text"]
+        synopsis = " ".join(text_parts).strip()
+        print(f"  → {synopsis}")
+        return synopsis
+    except Exception as e:
+        print(f"  Could not generate synopsis: {e}")
+        return ""
+
+
 # ---------- Step 4: Enrich (web search) ----------
 
-def enrich_one(name, api_key, profile_summary):
-    body = {
-        "model": "claude-sonnet-4-5-20250929",
-        "max_tokens": 1024,
-        "tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 3}],
-        "messages": [{"role": "user", "content": f"""Search for "{name}" company. Find:
+def enrich_one(name, api_key, profile_summary, hint=None, synopsis=None, use_search=True):
+    """Enrich one company. `hint` and `synopsis` are passed to disambiguate
+    generic names like "Keel" or "Beehive". `use_search=False` skips the
+    web_search tool — used as a fallback when web search returns no text."""
+    context_lines = []
+    if synopsis:
+        context_lines.append(f"Conference context: {synopsis}")
+    if hint:
+        context_lines.append(f"Initial guess about this company: {hint}")
+    context = ("\n" + "\n".join(context_lines) + "\n") if context_lines else ""
+
+    instruction = (
+        f'Search the web for the company "{name}".' if use_search
+        else f'Describe the company "{name}" using your training data (no web search needed).'
+    )
+
+    user_msg = f"""{instruction}{context}
+Use the context above to disambiguate which company this is if the name is generic.
+
+Find:
 1. What they do (1-2 sentences)
 2. Founded year
 3. Funding raised (if any)
@@ -274,11 +326,26 @@ def enrich_one(name, api_key, profile_summary):
 6. Why they're innovative (relevant to: {profile_summary})
 
 Respond as JSON: {{"name": "...", "description": "...", "founded": "...", "funding": "...", "stage": "...", "hq": "...", "innovation": "...", "url": "..."}}
-Only JSON, no other text."""}],
+Only JSON, no other text. If you genuinely cannot find anything, return {{"description": "Unknown — could not find specific information"}}."""
+
+    body = {
+        "model": "claude-sonnet-4-5-20250929",
+        "max_tokens": 1024,
+        "messages": [{"role": "user", "content": user_msg}],
     }
+    if use_search:
+        body["tools"] = [{"type": "web_search_20250305", "name": "web_search", "max_uses": 3}]
+
     result = call_claude(api_key, body, timeout=90)
     text_parts = [b["text"] for b in result["content"] if b.get("type") == "text"]
-    text = " ".join(text_parts)
+    text = " ".join(text_parts).strip()
+
+    if not text:
+        raise ValueError(
+            "Claude returned only tool_use blocks (no text). "
+            "Likely ambiguous search results — needs disambiguation hint or knowledge-only fallback."
+        )
+
     return parse_json_text(text)
 
 
@@ -288,6 +355,7 @@ def enrich_companies(candidates, config, scan_dir, started_at, label="Enriching 
     without losing progress."""
     api_key = config["api_key"]
     profile_summary = config["profile"][:300]
+    synopsis = config.get("synopsis") or None
     results_path = os.path.join(scan_dir, "results.json")
 
     print(f"\n{label}: {len(candidates)} companies via web search...")
@@ -299,16 +367,39 @@ def enrich_companies(candidates, config, scan_dir, started_at, label="Enriching 
         if company.get("description"):
             enriched.append(company)
             continue
+
+        hint = company.get("reason") or None
         info = None
         last_err = None
+
+        # Pass 1: web search + retries with backoff
         for attempt in range(3):
             try:
-                info = enrich_one(company["name"], api_key, profile_summary)
+                info = enrich_one(
+                    company["name"], api_key, profile_summary,
+                    hint=hint, synopsis=synopsis, use_search=True,
+                )
                 break
             except Exception as e:
                 last_err = e
-                print(f"    Attempt {attempt+1}/3 failed: {e}")
-                time.sleep(1 + attempt * 2)  # 1s, 3s backoff
+                print(f"    Attempt {attempt+1}/3 (web search) failed: {e}")
+                time.sleep(1 + attempt * 2)  # 1s, 3s
+
+        # Pass 2: knowledge-only fallback if web search exhausted all retries.
+        # Helps with ambiguous names like "Keel" where search returns mixed
+        # results across multiple companies and Claude refuses to commit.
+        if info is None:
+            print(f"    Falling back to knowledge-only enrichment...")
+            try:
+                info = enrich_one(
+                    company["name"], api_key, profile_summary,
+                    hint=hint, synopsis=synopsis, use_search=False,
+                )
+                print(f"    Knowledge-only fallback succeeded.")
+            except Exception as e:
+                last_err = e
+                print(f"    Knowledge-only fallback also failed: {e}")
+
         if info is not None:
             # Never let Claude's response overwrite the original name (it sometimes
             # returns a slightly different spelling, which breaks the merge step).
@@ -316,7 +407,7 @@ def enrich_companies(candidates, config, scan_dir, started_at, label="Enriching 
             info["enriched_at"] = datetime.now(timezone.utc).isoformat()
             enriched.append({**company, **info})
         else:
-            print(f"    Giving up on {company['name']} after 3 attempts: {last_err}")
+            print(f"    Giving up on {company['name']}: {last_err}")
             enriched.append(company)
 
         # Incremental save every 10 companies so partial results survive cancel
@@ -600,6 +691,17 @@ def main():
     candidates = [c for c in all_companies if is_likely_startup(c)]
     print(f"Pre-filtered: {len(all_companies) - len(candidates)} dropped")
     print(f"Remaining candidates: {len(candidates)}")
+
+    # Step 2.5: Generate conference synopsis (used as disambiguation context
+    # downstream by triage and enrichment for ambiguous company names).
+    if not config.get("synopsis"):
+        synopsis = generate_synopsis(config, scan_dir, started_at)
+        if synopsis:
+            config["synopsis"] = synopsis
+            # Persist immediately so the UI can show it during the long triage step.
+            # strip_api_key only touches the file on disk; the in-memory config
+            # still has api_key for downstream Claude calls.
+            strip_api_key(config_path, config)
 
     # Step 3: Coarse triage (cheap, by name only)
     try:

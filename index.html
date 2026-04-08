@@ -464,7 +464,8 @@ function renderScanCard(s) {
     <a href="#/scan/${s.id}" class="block bg-white rounded-xl border p-5 hover:shadow-md transition-shadow relative">
       <button onclick="event.preventDefault();event.stopPropagation();deleteScan('${s.id}', '${(s.name||'').replace(/'/g,"\\'")}')" class="absolute top-3 right-3 text-gray-300 hover:text-red-500" title="Delete">&times;</button>
       <h3 class="font-semibold text-gray-900 text-lg pr-6">${s.name}</h3>
-      <p class="text-xs text-gray-500 truncate mt-1">${s.url}</p>
+      ${s.url ? `<p class="text-xs text-gray-500 truncate mt-1">${s.url}</p>` : ''}
+      ${s.synopsis ? `<p class="text-xs text-gray-400 mt-2 line-clamp-3">${s.synopsis}</p>` : ''}
       <div class="flex flex-wrap gap-1.5 mt-3">
         <span class="text-xs px-2 py-0.5 rounded-full ${statusBg}">${statusLabel}${!isDone && s.percent ? ' '+s.percent+'%' : ''}</span>
         ${s.relevant_matches ? `<span class="text-xs px-2 py-0.5 rounded-full bg-violet-100 text-violet-700">${s.relevant_matches} matches</span>` : ''}
@@ -513,9 +514,10 @@ async function renderScan(id) {
     </div>
     <div class="max-w-7xl mx-auto px-6 py-8">
       <div class="mb-4"><a href="#/" class="text-sm text-violet-600 hover:underline">&larr; Back to scans</a></div>
-      <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6">
-        <div>
+      <div class="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 mb-6">
+        <div class="flex-1 min-w-0">
           <h1 id="scan-title" class="text-3xl font-bold text-gray-900">Loading...</h1>
+          <p id="scan-synopsis" class="hidden text-sm text-gray-400 mt-2 max-w-3xl"></p>
           <p id="stats" class="text-gray-500 mt-1"></p>
         </div>
         <div class="flex items-center gap-2">
@@ -588,6 +590,13 @@ async function loadScanData(id) {
     const data = await res.json();
     currentScanConfig = data.config || {};
     document.getElementById('scan-title').textContent = data.config.name || id;
+    const synopsisEl = document.getElementById('scan-synopsis');
+    if (data.config.synopsis) {
+      synopsisEl.textContent = data.config.synopsis;
+      synopsisEl.classList.remove('hidden');
+    } else {
+      synopsisEl.classList.add('hidden');
+    }
     starred = data.starred || {};
     allData = (data.results.results || []).map(d => ({
       ...d,
@@ -640,11 +649,13 @@ async function enrichUncertain() {
 
 // Pipeline step definitions
 const PIPELINE_STEPS = [
-  { key: 'load', label: 'Load companies', stages: ['starting', 'scraping', 'loading'] },
-  { key: 'filter', label: 'Pre-filter', stages: ['filtering'] },
-  { key: 'classify', label: 'Classify & score', stages: ['classifying'] },
-  { key: 'enrich', label: 'Enrich top candidates', stages: ['enriching'] },
-  { key: 'categorize', label: 'Auto-categorize', stages: ['categorizing'], optional: true },
+  { key: 'load',       label: 'Load companies',          stages: ['starting','scraping','loading'] },
+  { key: 'filter',     label: 'Pre-filter',              stages: ['filtering'] },
+  { key: 'synopsis',   label: 'Conference synopsis',     stages: ['synopsis'] },
+  { key: 'triage',     label: 'Coarse triage',           stages: ['triaging','classifying'] },
+  { key: 'enrich',     label: 'Enrich (web search)',     stages: ['enriching'] },
+  { key: 'score',      label: 'Score with full context', stages: ['scoring'] },
+  { key: 'categorize', label: 'Auto-categorize',         stages: ['categorizing'], optional: true },
 ];
 
 let currentScanConfig = null;
