@@ -778,17 +778,20 @@ const FUNDING_LABELS = ['Any','$100K','$500K','$1M','$5M','$10M','$25M','$50M','
 function parseFunding(s) {
   if (!s) return null;
   s = s.replace(/,/g, '');
-  const m = s.match(/\$([\d.]+)\s*(billion|B|million|M|K|thousand)?/i);
+  // Allow optional "+" and whitespace between the number and the unit, e.g. "$10+ billion"
+  const m = s.match(/\$([\d.]+)\s*\+?\s*(billion|bn|B|million|mm|M|K|thousand)?/i);
   if (!m) return null;
   let val = parseFloat(m[1]);
   let unit = (m[2] || '').toUpperCase();
   if (!unit) {
-    const range = s.match(/\$([\d.]+)\s*[-–]\s*\$?([\d.]+)\s*(billion|B|million|M|K|thousand)/i);
+    // Range like "$2.5 - $2.79B"
+    const range = s.match(/\$([\d.]+)\s*[-–]\s*\$?([\d.]+)\s*(billion|bn|B|million|mm|M|K|thousand)/i);
     if (range) unit = range[3].toUpperCase();
   }
-  if (unit === 'BILLION' || unit === 'B') return val * 1000;
-  if (unit === 'MILLION' || unit === 'M') return val;
+  if (unit === 'BILLION' || unit === 'BN' || unit === 'B') return val * 1000;
+  if (unit === 'MILLION' || unit === 'MM' || unit === 'M') return val;
   if (unit === 'K' || unit === 'THOUSAND') return val / 1000;
+  // No unit — assume raw dollars
   if (val >= 1000000) return val / 1000000;
   if (val >= 1000) return val / 1000000;
   return val;
