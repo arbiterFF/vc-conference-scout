@@ -36,22 +36,37 @@ A few minutes and a few dollars of Claude API spend later I had a filterable, sc
 
 ## Quickstart
 
+**Requirements:** Python 3.8+ and an [Anthropic API key](https://console.anthropic.com).
+
 ```bash
 git clone https://github.com/arbiterFF/vc-conference-scout.git
 cd vc-conference-scout
-pip install requests beautifulsoup4
+
+# Create a virtual env (avoids the "externally-managed-environment" error
+# you'll hit on modern macOS / Debian / Ubuntu if you skip this).
+python3 -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+
+pip install -r requirements.txt
 python3 server.py
 ```
 
-Open http://localhost:8081
+The server runs on **http://localhost:8081**. Open it in your browser.
 
 1. Click **⚙ Settings** → paste your Anthropic API key → click **Save Key**.
 2. Write your investment thesis in the **Profile** field. Or paste your firm's website URL and click **Extract from URL** — Claude will read the site and draft a profile for you.
 3. Click **+ New Scan** → give it a name → choose source:
-   - **From URL**: paste the conference's "attending companies" page URL
-   - **CSV upload**: drop a CSV/TXT file (one company per line, or a column called `name`/`company`)
+   - **From URL**: paste the conference's "attending companies" page URL. *Note: many conference sites (Map-Your-Show, 6Connex, Webflow) load their attendee list with JavaScript and won't work with URL scraping — if your scan fails with a "couldn't find any company names" error, fall back to CSV upload.*
+   - **CSV upload**: drop a CSV/TXT file. The parser auto-detects which column holds the company names (looks for a header like `name`/`company`/`exhibitor` or scores each column for name-like content).
 4. Choose **Auto-generate** categories (recommended) or **Manual**.
 5. Hit **Start Scan**. Watch the progress bar. Browse the results when it's done.
+
+### Common install errors
+
+- **`error: externally-managed-environment`** when running `pip install` → you skipped the venv step. Go back and run `python3 -m venv .venv && source .venv/bin/activate` first.
+- **`ModuleNotFoundError: No module named 'requests'`** when running `python3 server.py` → your `pip` and `python3` resolved to different Python installations. Use `python3 -m pip install -r requirements.txt` to be explicit.
+- **`OSError: [Errno 48] Address already in use`** → something else is on port 8081. Either stop that process (`lsof -ti :8081 | xargs kill`) or change the port in `server.py` (last few lines).
+- **`python3: command not found`** → install Python 3 from [python.org](https://www.python.org/downloads/) or via Homebrew (`brew install python`).
 
 ---
 
