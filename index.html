@@ -118,6 +118,9 @@
       <div id="ns-key-warn" class="hidden bg-yellow-50 border border-yellow-200 rounded p-3 text-sm text-yellow-800">
         Set your Anthropic API key in <button class="underline" onclick="closeNewScan();openSettings()">Settings</button> first.
       </div>
+      <div class="bg-violet-50 border border-violet-200 rounded p-3 text-xs text-violet-900">
+        <strong>Typical cost:</strong> $30–60 per conference, ~15–25 minutes. The pipeline coarse-triages all attendees, then enriches every high-confidence match (relevance ≥ 5) with a web search before scoring with full context. Low-confidence candidates stay as name-only — deepen them later with the <em>Enrich uncertain</em> button on the scan page.
+      </div>
     </div>
     <div class="flex gap-2 mt-6 pt-4 border-t">
       <button onclick="submitNewScan()" class="btn btn-primary">Start Scan</button>
@@ -513,7 +516,10 @@ async function renderScan(id) {
           <h1 id="scan-title" class="text-3xl font-bold text-gray-900">Loading...</h1>
           <p id="stats" class="text-gray-500 mt-1"></p>
         </div>
-        <input id="search" type="text" placeholder="Search companies..." class="input sm:w-72"/>
+        <div class="flex items-center gap-2">
+          <button id="enrich-uncertain-btn" onclick="enrichUncertain()" class="hidden btn btn-secondary whitespace-nowrap" title="Enrich the candidates that are still name-only"></button>
+          <input id="search" type="text" placeholder="Search companies..." class="input sm:w-72"/>
+        </div>
       </div>
       <div class="bg-white rounded-xl shadow-sm border p-5 mb-6 space-y-4">
         <div class="flex items-center gap-2 flex-wrap">
@@ -589,8 +595,44 @@ async function loadScanData(id) {
     updateStarredCount();
     buildFilters();
     render();
+    updateEnrichUncertainBtn(data);
   } catch (e) {
     document.getElementById('stats').textContent = 'Error: ' + e.message;
+  }
+}
+
+function updateEnrichUncertainBtn(data) {
+  const btn = document.getElementById('enrich-uncertain-btn');
+  if (!btn) return;
+  // Only show on completed scans with unenriched companies
+  const isDone = (data.progress && data.progress.stage === 'done') || (data.config && data.config.completed_at);
+  if (!isDone) { btn.classList.add('hidden'); return; }
+  const unenriched = allData.filter(c => !c.description).length;
+  if (unenriched === 0) { btn.classList.add('hidden'); return; }
+  // Cost estimate: ~$0.10 per enrichment + scoring overhead
+  const estCost = (unenriched * 0.10).toFixed(0);
+  btn.textContent = `↑ Enrich ${unenriched} uncertain (~$${estCost})`;
+  btn.classList.remove('hidden');
+}
+
+async function enrichUncertain() {
+  const s = getSettings();
+  if (!s.apiKey) { alert('Set your Anthropic API key in Settings first.'); return; }
+  const unenriched = allData.filter(c => !c.description).length;
+  if (!confirm(`Enrich ${unenriched} uncertain companies via web search? Estimated cost: ~$${(unenriched * 0.10).toFixed(0)}, ~${Math.ceil(unenriched * 3 / 60)} minutes.`)) return;
+  try {
+    const res = await fetch('/api/scans/' + currentScanId + '/enrich-uncertain', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ api_key: s.apiKey }),
+    });
+    if (!res.ok) throw new Error((await res.json()).error || 'Failed');
+    document.getElementById('enrich-uncertain-btn').classList.add('hidden');
+    if (progressInterval) clearInterval(progressInterval);
+    progressInterval = setInterval(() => pollProgress(currentScanId), 2000);
+    pollProgress(currentScanId);
+  } catch (e) {
+    alert('Error: ' + e.message);
   }
 }
 
@@ -757,6 +799,18 @@ function formatFunding(numM) {
   if (numM >= 1000) return '$' + (numM / 1000).toFixed(1).replace(/\.0$/, '') + 'B';
   if (numM >= 1) return '$' + numM.toFixed(1).replace(/\.0$/, '') + 'M';
   return '$' + Math.round(numM * 1000) + 'K';
+}
+
+function relativeTime(iso) {
+  if (!iso) return '';
+  const then = new Date(iso).getTime();
+  if (isNaN(then)) return '';
+  const diff = (Date.now() - then) / 1000;
+  if (diff < 60) return 'just now';
+  if (diff < 3600) return Math.floor(diff/60) + 'm ago';
+  if (diff < 86400) return Math.floor(diff/3600) + 'h ago';
+  if (diff < 2592000) return Math.floor(diff/86400) + 'd ago';
+  return new Date(iso).toLocaleDateString();
 }
 
 // ===== Filters =====
@@ -932,6 +986,11 @@ function render() {
       </div>
       <p class="text-sm text-gray-600 mt-3 flex-1 line-clamp-3">${desc}</p>
       ${d.url?`<a href="${d.url}" target="_blank" rel="noopener" class="text-sm text-violet-600 hover:underline mt-3 truncate" onclick="event.stopPropagation()">${d.url}</a>`:''}
+      <div class="text-[10px] text-gray-400 mt-2 pt-2 border-t border-gray-100 flex items-center gap-1">
+        ${d.description
+          ? `<span class="text-emerald-600">●</span> Enriched${d.enriched_at ? ' '+relativeTime(d.enriched_at) : ''}`
+          : `<span class="text-gray-300">○</span> Name only — not enriched`}
+      </div>
     </div>`;
   }).join('');
 
@@ -939,9 +998,29 @@ function render() {
 }
 
 // ===== Company modal =====
-function openCompanyModal(name) {
+const EDIT_FIELDS = [
+  { key: 'name',        label: 'Name',         type: 'text' },
+  { key: 'relevance',   label: 'Score (1-10)', type: 'number' },
+  { key: 'category',    label: 'Category',     type: 'text' },
+  { key: 'stage',       label: 'Stage',        type: 'text' },
+  { key: 'founded',     label: 'Founded',      type: 'text' },
+  { key: 'hq',          label: 'HQ',           type: 'text' },
+  { key: 'funding',     label: 'Funding',      type: 'text' },
+  { key: 'url',         label: 'URL',          type: 'text' },
+  { key: 'description', label: 'Description',  type: 'textarea' },
+  { key: 'reason',      label: 'Why Relevant', type: 'textarea' },
+  { key: 'innovation',  label: 'Innovation',   type: 'textarea' },
+];
+
+function openCompanyModal(name, editMode = false) {
   const d = allData.find(c => c.name === name);
   if (!d) return;
+  if (editMode) renderCompanyEditModal(d);
+  else renderCompanyViewModal(d);
+  document.getElementById('modal-company').classList.remove('hidden');
+}
+
+function renderCompanyViewModal(d) {
   const isStarred = starred[d.name];
   const scoreBg = d.relevance >= 9 ? 'bg-green-100 text-green-800' : d.relevance >= 7 ? 'bg-yellow-100 text-yellow-800' : 'bg-gray-100 text-gray-700';
   const nameEsc = d.name.replace(/'/g, "\\'");
@@ -965,11 +1044,77 @@ function openCompanyModal(name) {
     ${d.reason?`<div class="mb-4"><h3 class="text-xs font-semibold text-gray-400 uppercase mb-1">Why Relevant</h3><p class="text-gray-700">${d.reason}</p></div>`:''}
     ${d.innovation?`<div class="mb-4"><h3 class="text-xs font-semibold text-gray-400 uppercase mb-1">Innovation</h3><p class="text-gray-700">${d.innovation}</p></div>`:''}
     ${d.url?`<a href="${d.url}" target="_blank" rel="noopener" class="text-violet-600 hover:underline text-sm">${d.url}</a>`:''}
+    <div class="text-[10px] text-gray-400 mt-4">
+      ${d.description
+        ? `<span class="text-emerald-600">●</span> Enriched${d.enriched_at ? ' '+relativeTime(d.enriched_at) : ''}`
+        : `<span class="text-gray-300">○</span> Name only — not enriched`}
+    </div>
     <div class="flex gap-2 mt-6 pt-4 border-t">
+      <button onclick="openCompanyModal('${nameEsc}', true)" class="pill pill-inactive">&#9998; Edit</button>
       <button onclick="deleteCompany('${nameEsc}')" class="pill pill-inactive" style="color:#ef4444;border-color:#fca5a5">Delete</button>
     </div>
   `;
-  document.getElementById('modal-company').classList.remove('hidden');
+}
+
+function renderCompanyEditModal(d) {
+  const nameEsc = d.name.replace(/'/g, "\\'");
+  const inputClass = 'w-full border border-gray-300 rounded px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-violet-500';
+  const fields = EDIT_FIELDS.map(f => {
+    const val = d[f.key] == null ? '' : d[f.key];
+    let input;
+    if (f.type === 'textarea') {
+      input = `<textarea id="edit-${f.key}" class="${inputClass}" rows="3">${String(val).replace(/</g,'&lt;')}</textarea>`;
+    } else if (f.type === 'number') {
+      input = `<input id="edit-${f.key}" type="number" min="1" max="10" value="${val}" class="${inputClass}"/>`;
+    } else {
+      input = `<input id="edit-${f.key}" type="text" value="${String(val).replace(/"/g,'&quot;')}" class="${inputClass}"/>`;
+    }
+    return `<div><label class="text-xs font-semibold text-gray-400 uppercase">${f.label}</label>${input}</div>`;
+  }).join('');
+  document.getElementById('company-modal-body').innerHTML = `
+    <h2 class="text-xl font-bold text-gray-900 mb-4">Editing: ${d.name}</h2>
+    <div class="space-y-3">${fields}</div>
+    <div class="flex gap-2 mt-6 pt-4 border-t">
+      <button onclick="saveCompanyEdit('${nameEsc}')" class="pill pill-active">Save</button>
+      <button onclick="openCompanyModal('${nameEsc}')" class="pill pill-inactive">Cancel</button>
+    </div>
+  `;
+}
+
+async function saveCompanyEdit(originalName) {
+  const update = { _originalName: originalName };
+  EDIT_FIELDS.forEach(f => {
+    const el = document.getElementById('edit-' + f.key);
+    let v = el.value;
+    if (f.type === 'number') v = parseInt(v) || 0;
+    update[f.key] = v;
+  });
+  try {
+    const res = await fetch('/api/scans/' + currentScanId + '/update-company', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(update),
+    });
+    if (!res.ok) throw new Error((await res.json()).error || 'Failed');
+    // Update local in-memory copy
+    const idx = allData.findIndex(c => c.name === originalName);
+    if (idx !== -1) {
+      EDIT_FIELDS.forEach(f => { allData[idx][f.key] = update[f.key]; });
+      allData[idx]._fundingNum = parseFunding(update.funding);
+      allData[idx]._stage = normalizeStage(update.stage);
+      if (update.name !== originalName && starred[originalName]) {
+        starred[update.name] = true;
+        delete starred[originalName];
+        fetch('/api/scans/' + currentScanId + '/star', {
+          method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(starred),
+        }).catch(()=>{});
+      }
+    }
+    render();
+    openCompanyModal(update.name);
+  } catch (e) {
+    alert('Error saving: ' + e.message);
+  }
 }
 
 function closeCompanyModal() { document.getElementById('modal-company').classList.add('hidden'); }
